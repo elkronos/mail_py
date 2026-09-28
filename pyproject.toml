@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "email-merge-tool"
+dynamic = ["version"]
+description = "Careful, reproducible mail merge: validation, dry runs, resumable sending and randomized message experiments."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["email", "mail merge", "smtp", "survey", "experiment", "a/b testing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Communications :: Email",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-cov", "ruff"]
+docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9,<10", "mkdocstrings[python]>=0.24"]
+
+[project.scripts]
+email-merge = "email_merge_tool.cli:main"
+
+[project.urls]
+Documentation = "https://elkronos.github.io/mail_py/"
+Source = "https://github.com/elkronos/mail_py"
+Issues = "https://github.com/elkronos/mail_py/issues"
+
+[tool.hatch.version]
+path = "src/email_merge_tool/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/email_merge_tool"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "docs", "examples", "README.md", "LICENSE", "CHANGELOG.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src"]
+# v0.1 files kept until they are deleted; see docs/review.md "Open items".
+extend-exclude = ["main", "setup.py", "tests/test_merge.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = ["S101"]  # assert is fine
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]

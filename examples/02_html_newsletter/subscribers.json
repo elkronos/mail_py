@@ -1,0 +1,4 @@
+[
+  {"email": "ann.lee@example.org", "first_name": "Ann", "id": "a1", "org": "Example Institute", "month": "June"},
+  {"email": "bo.chen@example.org", "first_name": "Bo <Admin>", "id": "b2", "org": "Example Institute", "month": "June"}
+]

@@ -1,0 +1,8 @@
+Subject: {org} newsletter: {month}
+
+Hi {first_name},
+
+This month: new study results, and our summer schedule.
+Read online: https://example.org/news/{month}
+
+To stop receiving these emails: https://example.org/unsubscribe?id={id}

@@ -1,0 +1,68 @@
+site_name: email-merge-tool
+site_description: Careful, reproducible mail merge for Python, with validation, dry runs, resumable sending and randomized message experiments.
+site_url: https://elkronos.github.io/mail_py/
+repo_url: https://github.com/elkronos/mail_py
+repo_name: elkronos/mail_py
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: {icon: material/weather-night, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: {icon: material/weather-sunny, name: Light mode}
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Walkthroughs:
+      - 1. Your first merge: tutorials/first-merge.md
+      - 2. An HTML newsletter: tutorials/html-newsletter.md
+      - 3. A survey invitation experiment: tutorials/survey-experiment.md
+  - Guide:
+      - Templates: guide/templates.md
+      - Recipient data: guide/data.md
+      - Sending safely: guide/sending.md
+      - Resume, limits and reminders: guide/resume.md
+      - Deliverability: guide/deliverability.md
+      - Experiments (methodology): guide/experiments.md
+  - Reference:
+      - Command line: cli.md
+      - Python API: api.md
+  - How it compares: comparison.md
+  - Code review (v0.1 to v0.2): review.md
+  - Changelog: changelog.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: false
+            members_order: source
+            show_root_heading: true
+            heading_level: 3

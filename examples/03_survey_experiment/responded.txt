@@ -1,0 +1,9 @@
+# Addresses exported from the survey platform after wave 1.
+bo1@example.edu
+eli4@example.edu
+hana7@example.edu
+kofi10@example.edu
+nora13@example.edu
+ravi17@example.edu
+wen22@example.edu
+dev3@example.edu

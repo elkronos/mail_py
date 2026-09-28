@@ -1,0 +1,12 @@
+Subject: {first_name}, your view on faculty climate
+Reply-To: survey-team@example.edu
+
+Dear {first_name},
+
+The Faculty Affairs office is asking all {department} faculty to complete a
+10-minute survey about workplace climate. Your answers are confidential.
+
+Take the survey: https://survey.example.edu/s/climate
+
+Thank you,
+Faculty Affairs survey team
