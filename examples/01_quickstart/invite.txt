@@ -1,0 +1,10 @@
+Subject: You're invited to the lab open house, {first_name}
+Reply-To: openhouse@example.org
+
+Dear {first_name},
+
+We would love to see you at the {lab} open house on {date}.
+Doors open at 3pm; there will be demos and coffee.
+
+Best wishes,
+The {lab} team

@@ -1,0 +1,11 @@
+Subject: Reminder: faculty climate survey
+Reply-To: survey-team@example.edu
+
+Dear {first_name},
+
+A few days ago we invited you to a 10-minute survey on faculty climate. If you
+have already responded, thank you, and please ignore this message.
+
+Take the survey: https://survey.example.edu/s/climate
+
+Faculty Affairs survey team

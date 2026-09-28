@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+site/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Output of the examples and of dry runs
+outbox*/
+*.eml
+*.jsonl
+examples/**/assignments.csv
+email_log.txt
