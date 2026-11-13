@@ -131,7 +131,8 @@ def test_csv_quote_pair_that_swallows_rows_is_an_error(tmp_path):
 
 def test_csv_multiline_cells_and_inner_quotes_still_load(tmp_path):
     p = tmp_path / "p.csv"
-    p.write_text('email,notes\nann@example.org,"line one\nline two"\nbo@example.org,O"Brien\n', encoding="utf-8")
+    # Bytes, so Windows does not turn the newline inside the cell into \r\n.
+    p.write_bytes(b'email,notes\nann@example.org,"line one\nline two"\nbo@example.org,O"Brien\n')
     assert load_recipients(p) == [
         {"email": "ann@example.org", "notes": "line one\nline two"},
         {"email": "bo@example.org", "notes": 'O"Brien'},
