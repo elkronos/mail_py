@@ -13,10 +13,16 @@ mailing*. Reusing it for a different mailing would skip everyone from the
 first one.
 
 A send that names a log which already records sent messages is refused
-unless you add `--resume` (`resume=True`). Running the same command twice by
-accident therefore cannot email everyone a second time. With `--resume`, a
-log that doesn't exist yet or has no sent records produces a warning, which
-catches a mistyped file name.
+unless you add `--resume` (`resume=True`), so repeating a command with the
+same log file cannot email everyone a second time. The preview prints the
+log's full path and says whether it is a new file, which shows when a
+relative path points somewhere unexpected.
+
+`--resume` checks the log too. A log that doesn't exist is an error (a
+mistyped name would otherwise skip nobody), and so is a log whose addresses
+are all missing from the recipient data (probably another mailing's log).
+While a run sends, it holds a lock on the log, so a second run with the same
+log stops with an error instead of emailing the same people.
 
 ## Resume
 
@@ -31,8 +37,9 @@ correct even if you've sorted, filtered or appended to the CSV in the
 meantime. Tools that resume "from row N" can silently skip or repeat people
 when the file changes.
 
-A message is logged `uncertain` when the connection drops after its content
-was sent but before the server confirmed it. The server may have delivered it,
+A message is logged `uncertain` when the connection drops, the reply is
+garbled, or you press Ctrl-C after its content was sent but before the server
+confirmed it. The server may have delivered it,
 so it is not retried and `--resume` skips it. Check those recipients yourself,
 for example in your provider's Sent folder.
 
@@ -43,11 +50,12 @@ message per crash.
 ## Limits (daily quotas)
 
 ```bash
-email-merge ... --send --log big.jsonl --resume --limit 450
+email-merge ... --send --log big.jsonl --limit 450            # day 1
+email-merge ... --send --log big.jsonl --limit 450 --resume   # each later day
 ```
 
-This sends at most 450 messages this run, and the rest are logged as `skipped`
-(`limit reached`). Run the same command tomorrow to send the next 450.
+This sends at most 450 messages a run, and the rest are logged as `skipped`
+(`limit reached`). Messages logged `uncertain` count toward the limit.
 
 ## Reminder waves
 

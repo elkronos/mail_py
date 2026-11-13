@@ -144,8 +144,19 @@ def test_repeating_a_send_without_resume_sends_nothing(files, fake_smtp, capsys)
     capsys.readouterr()
 
     assert main(_send_args(files, "--log", log)) == 2  # the same command again
-    assert "already records 2 sent address(es)" in capsys.readouterr().err
+    assert "already records 2 sent or uncertain address(es)" in capsys.readouterr().err
     assert len(fake_smtp.instances) == 1  # never reconnected
 
     assert main(_send_args(files, "--log", log, "--resume")) == 0
     assert sum(len(c.sent) for c in fake_smtp.instances) == 2  # nobody got a second copy
+
+
+def test_resume_needs_a_log_and_the_preview_shows_it(files, fake_smtp, capsys):
+    with pytest.raises(SystemExit):
+        main(_send_args(files, "--no-log", "--resume"))
+    assert "--resume needs --log FILE" in capsys.readouterr().err
+    log = files / "sent.jsonl"
+    assert main(_send_args(files, "--log", str(log))) == 0
+    assert f"Send log: {log.resolve()} (new file)" in capsys.readouterr().out
+    assert main(_send_args(files, "--log", str(log), "--resume")) == 0
+    assert "(2 address(es) recorded as sent or uncertain)" in capsys.readouterr().out

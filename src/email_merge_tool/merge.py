@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from email import policy
-from email.errors import ObsoleteHeaderDefect
+from email.errors import MessageError
 from email.message import EmailMessage
 from pathlib import Path
 
 from .data import (
     DataError,
     Issue,
+    _valid_address_list,
     is_valid_address,
     load_address_list,
     load_recipients,
@@ -121,7 +121,7 @@ def mail_merge(
     weights: Sequence[float] | None = None,
     variant_field: str | None = None,
     assignments_path: str | Path | None = None,
-    exclude: Iterable[str] | str | Path | None = None,
+    exclude: object = None,
     log_path: str | Path | None = None,
     resume: bool = False,
     limit: int | None = None,
@@ -214,32 +214,26 @@ def mail_merge(
     if attachment_field:
         fields.add(attachment_field)
     issues = validate_recipients(records, fields, to_field=to_field, allow_duplicates=allow_duplicates)
+    keys = {normalize_address(r.get(to_field) or "") for r in records}
     skip: set[str] = set()
     if exclude is not None:
         try:
             skip = load_address_list(exclude, to_field=to_field)
         except DataError as exc:
-            issues.insert(0, Issue(None, "error", f"exclude list: {exc}"))
+            issues.insert(0, Issue(None, "error", str(exc).replace("\n", "\n    "), where="exclude list"))
         else:
-            keys = {normalize_address(r.get(to_field) or "") for r in records}
-            if skip and not skip & keys:
-                note = f"exclude list: none of its {len(skip)} address(es) is in the recipient data"
-                issues.append(Issue(None, "warning", note))
+            if not skip:
+                issues.append(
+                    Issue(None, "warning", "it holds no addresses, so nobody is excluded", where="exclude list")
+                )
+            elif not skip & keys:
+                note = f"none of its {len(skip)} address(es) is in the recipient data"
+                issues.append(Issue(None, "warning", note, where="exclude list"))
     already: set[str] = set()
     if log_path is not None:
-        already = sent_addresses(log_path)
-        if already and not resume:
-            issues.insert(
-                0,
-                Issue(
-                    None,
-                    "error",
-                    f"send log {log_path} already records {len(already)} sent address(es); resume to skip them "
-                    "(--resume, or resume=True), or use a new log file for a new mailing",
-                ),
-            )
-        elif resume and not already:
-            issues.append(Issue(None, "warning", f"resume: send log {log_path} records no sent messages yet"))
+        already, log_issue = _check_send_log(Path(log_path), resume, keys)
+        if log_issue is not None:
+            issues.insert(0, log_issue)
     if sender and not is_valid_address(sender):
         issues.insert(0, Issue(None, "error", f"invalid sender address {sender!r}"))
     if not sender and any("From" not in t.headers for t in tpls.values()):
@@ -259,6 +253,8 @@ def mail_merge(
     errors = [i for i in issues if i.severity == "error"]
     if errors:
         raise DataError(_describe(errors), errors)
+    for issue in report.issues:  # so a caller of the API sees them before anything is sent
+        logger.warning("%s", issue)
 
     if len(tpls) > 1 and seed is not None:
         report.assignments = assign_variants(
@@ -293,6 +289,16 @@ def mail_merge(
                 one_click_unsubscribe=one_click_unsubscribe,
                 attachments=files,
             )
+            for name, value in message.items():  # what smtplib's generator does; fails here, not mid-run
+                try:
+                    message.policy.fold_binary(name, value)
+                except MessageError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - RecursionError, IndexError and others on odd input
+                    raise MessageError(f"{name}: {str(exc) or type(exc).__name__}") from exc
+        except MessageError as exc:
+            errors.append(Issue(row, "error", f"a header cannot be written: {exc}"))
+            continue
         except (TemplateError, ValueError, OSError) as exc:
             errors.append(Issue(row, "error", str(exc)))
             continue
@@ -303,8 +309,25 @@ def mail_merge(
     if not resume:
         already = set()
 
+    log: SendLog | None = None
+    if log_path is not None and not dry_run:
+        # Hold the log for the whole run, and read it again under the lock:
+        # another run may have sent and logged since validation.
+        log = SendLog(log_path)
+        try:
+            log.lock()
+            current = sent_addresses(log_path)
+        except BaseException:
+            log.close()
+            raise
+        if current and not resume:
+            log.close()
+            issue = _reuse_issue(Path(log_path), current)
+            raise DataError(_describe([issue]), [issue])
+        if resume:
+            already = current
+
     active: Transport = transport if (transport is not None and not dry_run) else DryRunTransport(output_dir)
-    log = SendLog(log_path) if log_path is not None else None
     delivered = 0
     try:
         active.open()
@@ -312,20 +335,32 @@ def mail_merge(
             key = normalize_address(to)
             variant_label = variant if len(tpls) > 1 else None
             if key in skip or key in already:
-                reason = "excluded" if key in skip else "already in the send log (resume)"
+                reason = "excluded" if key in skip else "already in the send log"
                 result = Result(to, "skipped", variant_label, detail=reason)
             elif limit is not None and delivered >= limit:
                 result = Result(to, "skipped", variant_label, detail="limit reached")
             else:
                 if delivered and min_interval and not dry_run:
                     time.sleep(min_interval)
-                result = _deliver(active, message, to, variant_label, dry_run)
-                if result.status in {"sent", "dry_run"}:
+                try:
+                    result = _deliver(active, message, to, variant_label, dry_run)
+                except BaseException:
+                    if log is not None and getattr(active, "unconfirmed", False):  # e.g. Ctrl-C awaiting the reply
+                        log.write(
+                            to=to,
+                            status="uncertain",
+                            variant=variant_label,
+                            message_id=str(message["Message-ID"]),
+                            detail="interrupted after the message was sent; it may have arrived",
+                            seed=seed,
+                        )
+                    raise
+                if result.status in {"sent", "dry_run", "uncertain"}:  # an uncertain one most likely went out
                     delivered += 1
                 if dry_run:
                     report.messages.append(message)
             report.results.append(result)
-            if log is not None and not dry_run:
+            if log is not None:
                 log.write(
                     to=to,
                     status=result.status,
@@ -343,6 +378,48 @@ def mail_merge(
     return report
 
 
+def _check_send_log(path: Path, resume: bool, keys: set[str]) -> tuple[set[str], Issue | None]:
+    """Read the send log before a run, and say what is wrong with using it.
+
+    Returns the addresses the log records as sent or uncertain, and an issue:
+    an error when reusing the log could email people twice (or when a resume
+    would skip nobody because the log is missing or belongs to other people),
+    or a warning when a resume finds nothing to skip.
+    """
+    logged = sent_addresses(path)
+    if not resume:
+        return logged, _reuse_issue(path, logged) if logged else None
+    if not path.exists():
+        return logged, Issue(
+            None,
+            "error",
+            f"{path} does not exist, so resuming would skip nobody; check the file name "
+            "(leave out --resume for the first run of a mailing)",
+            where="send log",
+        )
+    if not logged:
+        return logged, Issue(None, "warning", f"{path} records no sent messages yet", where="send log")
+    if not logged & keys:
+        return logged, Issue(
+            None,
+            "error",
+            f"{path} records {len(logged)} address(es), and none of them is in this recipient data; "
+            "check that it is the log of this mailing",
+            where="send log",
+        )
+    return logged, None
+
+
+def _reuse_issue(path: Path, logged: set[str]) -> Issue:
+    return Issue(
+        None,
+        "error",
+        f"{path} already records {len(logged)} sent or uncertain address(es); resume to skip them "
+        "(--resume, or resume=True), or use a new log file for a new mailing",
+        where="send log",
+    )
+
+
 def _deliver(transport: Transport, message: EmailMessage, to: str, variant: str | None, dry_run: bool) -> Result:
     message_id = str(message["Message-ID"])
     try:
@@ -357,25 +434,6 @@ def _deliver(transport: Transport, message: EmailMessage, to: str, variant: str 
         raise
     detail = f"some recipients refused: {refused}" if refused else ""
     return Result(to, "dry_run" if dry_run else "sent", variant, message_id, detail)
-
-
-def _valid_address_list(value: str) -> bool:
-    """Whether a header value like "A <a@x.org>, b@y.org" is a clean list of valid addresses.
-
-    The value is parsed the way the message header will be, so a value that
-    passes is delivered to exactly the addresses written.
-    """
-    try:
-        header = policy.default.header_factory("To", value)
-        groups, defects = header.groups, header.defects
-    except Exception:  # noqa: BLE001 - the stdlib parser raises several types on odd input
-        return False
-    if any(not isinstance(d, ObsoleteHeaderDefect) for d in defects):
-        return False
-    if any(g.display_name is not None for g in groups):
-        return False
-    addresses = [a for g in groups for a in g.addresses]
-    return bool(addresses) and all(is_valid_address(str(a)) for a in addresses)
 
 
 def _describe(errors: Sequence[Issue], shown: int = 20) -> str:

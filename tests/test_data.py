@@ -17,7 +17,7 @@ def test_csv_with_excel_bom_and_padding(tmp_path):
 def test_csv_extra_field_is_an_error(tmp_path):
     p = tmp_path / "p.csv"
     p.write_text("email,name\nann@example.org,Smith, Ann\n", encoding="utf-8")
-    with pytest.raises(DataError, match="row 1 has more fields"):
+    with pytest.raises(DataError, match=r"row 1 \(line 2\) has more fields"):
         load_recipients(p)
 
 
@@ -125,7 +125,7 @@ def test_csv_quote_pair_that_swallows_rows_is_an_error(tmp_path):
     p.write_text(
         'email,name\nann@example.org,"Ann\nbo@example.org,Bo\ncy@example.org,Cy"\ndi@example.org,Di\n', encoding="utf-8"
     )
-    with pytest.raises(DataError, match="row 1 .*column 'name' spans several lines"):
+    with pytest.raises(DataError, match="row 1 .*column 'name' holds several lines"):
         load_recipients(p)
 
 
@@ -206,3 +206,114 @@ def test_address_list_sources(tmp_path):
     c.write_text("Email Address\nann@example.org\n", encoding="utf-8")
     with pytest.raises(DataError, match="no 'email' column"):
         load_address_list(c)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_swallowed_rows_are_caught_with_any_line_ending(tmp_path, newline):
+    text = 'email,name\nann@example.org,"Ann\nbo@example.org,Bo\ncy@example.org,Cy"\ndi@example.org,Di\n'
+    p = tmp_path / "p.csv"
+    p.write_bytes(text.replace("\n", newline).encode())
+    with pytest.raises(DataError, match="holds several lines"):
+        load_recipients(p)
+
+
+def test_swallow_that_closes_on_the_next_line_is_caught(tmp_path):
+    # The stray quote is in a column before the address, so only the first
+    # line of the cell holds the swallowed address.
+    p = tmp_path / "p.csv"
+    p.write_text(
+        'name,email\n"Ann Lee,ann@example.org\nBo Smith",bo@example.org\nCy,cy@example.org\n', encoding="utf-8"
+    )
+    with pytest.raises(DataError, match="row 1 .*column 'name' holds several lines"):
+        load_recipients(p)
+
+
+def test_stray_quote_in_the_header_is_an_error(tmp_path):
+    p = tmp_path / "p.csv"
+    p.write_text(
+        'email,first_name,"notes\nann@example.org,Ann,VIP\nbo@example.org,Bo,x"\ncy@example.org,Cy,\n', encoding="utf-8"
+    )
+    with pytest.raises(DataError, match="column name spans several lines"):
+        load_recipients(p)
+
+
+def test_prose_with_addresses_in_a_multiline_cell_still_loads(tmp_path):
+    p = tmp_path / "p.csv"
+    p.write_text(
+        'email,notes\nann@example.org,"Met at the conference.\nCc: bo@example.org, cy@example.org"\n'
+        'di@example.org,"Di Lee\nAcme Corp\ndi@acme.example, +1 555 0100"\n',
+        encoding="utf-8",
+    )
+    assert [r["email"] for r in load_recipients(p)] == ["ann@example.org", "di@example.org"]
+
+
+def test_long_text_in_a_multiline_cell_loads_quickly(tmp_path):
+    import time
+
+    p = tmp_path / "p.csv"
+    p.write_text('email,notes\nann@example.org,"see below\n' + "a" * 120_000 + '"\n', encoding="utf-8")
+    started = time.perf_counter()
+    load_recipients(p)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_error_lines_skip_blank_lines(tmp_path):
+    p = tmp_path / "p.csv"
+    p.write_text('email,name\n\n\nann@example.org,"Ann\nbo@example.org,Bo\n', encoding="utf-8")
+    with pytest.raises(DataError, match="starting on line 4"):
+        load_recipients(p)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["'ann@example.org'", "'ann@example.org", "ann@example.org|2024-05-01", "ann@example.org#note", "ann@example.org​"],
+)
+def test_annotated_or_invisible_addresses_are_invalid(value):
+    assert not is_valid_address(value)
+
+
+def test_exclusion_entries_from_every_source_are_cleaned_the_same_way(tmp_path):
+    c = tmp_path / "x.csv"
+    c.write_text("email\nann@example.org​\n", encoding="utf-8")
+    assert load_address_list(c) == {"ann@example.org"}
+    assert load_address_list(["bo@example.org​", None, float("nan"), b"cy@example.org"]) == {
+        "bo@example.org",
+        "cy@example.org",
+    }
+    with pytest.raises(DataError, match=r"'ann@example.org\|2024' is not a single valid address"):
+        load_address_list(["ann@example.org|2024"])
+
+
+def test_file_named_like_an_address_is_read_as_a_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "optout@2024.csv").write_text("email\nann@example.org\n", encoding="utf-8")
+    assert load_address_list(["optout@2024.csv"]) == {"ann@example.org"}
+
+
+def test_json_exclusion_records_must_all_have_the_address_key(tmp_path):
+    j = tmp_path / "x.json"
+    j.write_text(json.dumps([{"email": "ann@example.org"}, {"Email": "bo@example.org"}]), encoding="utf-8")
+    with pytest.raises(DataError, match="row 2: no 'email' key; did you mean 'Email'"):
+        load_address_list(j)
+
+
+def test_text_exclusion_file_encodings(tmp_path):
+    u16 = tmp_path / "u16.txt"
+    u16.write_bytes("ann@example.org\r\nbo@example.org\r\n".encode("utf-16"))
+    assert load_address_list(u16) == {"ann@example.org", "bo@example.org"}
+    cp = tmp_path / "cp.txt"
+    cp.write_bytes("Zoë <zoe@example.org>\n".encode("cp1252"))
+    with pytest.raises(DataError, match="is not valid UTF-8"):
+        load_address_list(cp)
+
+
+def test_space_after_a_closing_quote_gets_an_accurate_hint(tmp_path):
+    p = tmp_path / "p.csv"
+    p.write_text('name,email\n"Ann" ,ann@example.org\n', encoding="utf-8")
+    with pytest.raises(DataError, match="text follows a closing double quote"):
+        load_recipients(p)
+
+
+def test_deeply_nested_comment_is_invalid_not_a_crash():
+    # Short enough for the length cap, but the email generator cannot write it.
+    assert not is_valid_address("cy@example.org " + "(" * 250 + ")" * 250)

@@ -36,8 +36,8 @@ Without `--send`, the command validates everything, prints the first message
 | `--username` | SMTP login (default: the `--from` address). |
 | `--no-auth` | Don't log in (for example, an internal relay). |
 | `--log FILE` | JSON Lines send log. Required with `--send`. If the file already records sent messages, the run is refused unless you add `--resume`. |
-| `--no-log` | Send without a log. An interrupted run then cannot be resumed. |
-| `--resume` | Skip addresses the log records as `sent` or `uncertain`. |
+| `--no-log` | Send without a log. An interrupted run then cannot be resumed, and a repeated run is not refused. |
+| `--resume` | Skip addresses the log records as `sent` or `uncertain`. Needs `--log`; the log must exist and belong to this mailing. |
 | `--exclude FILE` | Addresses to skip (`.txt`, one per line, or `.csv`/`.json`). Every entry must be one valid address; see [reminder waves](guide/resume.md#reminder-waves). |
 | `--limit N` | Send at most N messages this run. |
 | `--rate PER_MIN` | Maximum send rate (default 20 per minute; `0` for no limit). |
@@ -64,7 +64,7 @@ email-merge -t invite.txt -d people.csv --from me@example.org --preview 5 --outp
 
 # Send through Gmail, logging, 450 per day
 email-merge -t invite.txt -d people.csv --from me@gmail.com --service gmail \
-    --send --log invite.jsonl --resume --limit 450
+    --send --log invite.jsonl --limit 450      # add --resume from the second day on
 
 # Institutional relay on port 25 without authentication
 email-merge -t invite.txt -d people.csv --from me@uni.edu --host smtp.uni.edu --port 25 --no-auth \

@@ -28,7 +28,7 @@ Before any message is built or sent, every row is checked:
 | No address appears twice (case-insensitive, display names ignored) | error, unless `allow_duplicates=True` |
 | Attachment files exist | error |
 | Rows with an unquoted comma have more cells than the header | error when loading |
-| An unbalanced double quote, or a cell that has swallowed other rows | error when loading |
+| An unbalanced double quote, a line break inside a column name, or a cell with a line that looks like another recipient's row (commas without spaces after them, and an address as one field) | error when loading |
 | A placeholder's value is empty | warning |
 
 Errors raise `DataError`. Its `.issues` attribute lists every problem, not
@@ -43,7 +43,10 @@ just the first, so you can fix them all in one pass.
     trailing text (`ann@x.org extra`), an unquoted comma in a name
     (`Lee, Ann <ann@x.org>`; write `"Lee, Ann" <ann@x.org>`) and group
     syntax. Non-ASCII characters before the `@` are rejected because sending
-    them needs SMTPUTF8. It can't tell whether a mailbox exists. Only delivery (and bounces) can,
+    them needs SMTPUTF8. The part after the `@` must be a domain name made of
+    letters, digits and hyphens, so `ann@x.org|2024` and `'ann@x.org'` (Excel's
+    text prefix) are rejected, as are invisible characters such as a
+    zero-width space. It can't tell whether a mailbox exists. Only delivery (and bounces) can,
     and "verifying" addresses by probing mail servers is unreliable and
     frowned upon by providers.
 

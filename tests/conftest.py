@@ -12,8 +12,9 @@ class FakeSMTP:
 
     instances: list["FakeSMTP"] = []
     # Scripted outcomes of successive send_message calls: None succeeds, an
-    # exception is raised before DATA, and ("after_data", exc) delivers the
-    # message and then raises exc, as when the server's final reply is lost.
+    # exception is raised before DATA, ("payload", exc) raises exc while the
+    # message is being written, and ("after_data", exc) delivers the message
+    # and then raises exc, as when the server's final reply is lost.
     failures: list = []
     login_error: Exception | None = None
 
@@ -23,6 +24,7 @@ class FakeSMTP:
         self.logged_in = None
         self.tls = context is not None
         self.closed = False
+        self.payload_error = None
         FakeSMTP.instances.append(self)
 
     def starttls(self, context=None):
@@ -36,17 +38,35 @@ class FakeSMTP:
     def send_message(self, msg):
         if FakeSMTP.failures:
             error = FakeSMTP.failures.pop(0)  # None means "this call succeeds"
+            if isinstance(error, tuple) and error[0] == "payload":
+                self.payload_error = error[1]
+                self.data(msg)  # raises from the second write
             if isinstance(error, tuple):
                 self.data(msg)  # like smtplib: goes through the instance's data()
-                raise error[1]
+                exc = error[1]
+                rejected = isinstance(exc, smtplib.SMTPResponseException) and 400 <= exc.smtp_code < 600
+                if not rejected:  # the server queued it, but its reply never arrived
+                    self.sent.append(msg)
+                raise exc
             if error is not None:
                 raise error
+        self.data(msg)
         self.sent.append(msg)
         return {}
 
     def data(self, msg):
-        self.sent.append(msg)
+        # smtplib's data() writes the DATA command, then the message.
+        self.send(b"DATA\r\n")
+        self.send(b"message\r\n.\r\n")
         return (250, b"queued")
+
+    def send(self, payload):
+        if payload != b"DATA\r\n" and self.payload_error is not None:
+            error, self.payload_error = self.payload_error, None
+            raise error
+
+    def close(self):
+        self.closed = True
 
     def quit(self):
         self.closed = True

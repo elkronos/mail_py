@@ -8,10 +8,12 @@ import os
 import sys
 from collections.abc import Sequence
 from email.utils import parseaddr
+from pathlib import Path
 
 from . import __version__
 from .data import DataError
 from .merge import MergeReport, Result, mail_merge
+from .sendlog import sent_addresses
 from .templates import TemplateError, load_template
 from .transport import PRESETS, FatalSendError, SMTPConfig, SMTPTransport
 
@@ -25,11 +27,11 @@ The SMTP password is read from ${PASSWORD_ENV}, or prompted for. It is never
 accepted as a command-line argument, where it would be visible to other users
 and saved in shell history.
 
---send needs --log FILE. If a run stops part-way (Ctrl-C, a daily limit,
+--send needs --log FILE (or --no-log). If a run stops part-way (Ctrl-C, a daily limit,
 a dropped connection), run the same command again with --resume added: people
 the log records as sent are skipped. Without --resume, a log that already
-records sent messages is refused, so a repeated command cannot email everyone
-a second time.
+records sent messages is refused, so repeating a command with the same log
+cannot email everyone a second time.
 
 examples:
   email-merge -t invite.txt -d people.csv --from "Lab <lab@example.org>"
@@ -92,8 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--username", help="SMTP login (default: the --from address)")
     g.add_argument("--no-auth", action="store_true", help="do not log in (e.g. an internal relay on port 25)")
     g.add_argument("--log", metavar="FILE", help="JSON Lines send log (audit trail); required with --send")
-    g.add_argument("--no-log", action="store_true", help="send without a log (an interrupted run cannot be resumed)")
-    g.add_argument("--resume", action="store_true", help="skip recipients already sent to in --log")
+    g.add_argument(
+        "--no-log",
+        action="store_true",
+        help="send without a log (an interrupted run cannot be resumed, and a repeated run is not refused)",
+    )
+    g.add_argument("--resume", action="store_true", help="skip recipients --log records as sent or uncertain")
     g.add_argument("--exclude", metavar="FILE", help="addresses to skip (.txt one per line, or .csv/.json)")
     g.add_argument("--limit", type=int, help="send at most N messages this run")
     g.add_argument(
@@ -128,7 +134,7 @@ def _transport(args: argparse.Namespace) -> SMTPTransport:
 def _print_progress(result: Result) -> None:
     extra = f" [{result.variant}]" if result.variant else ""
     detail = f" ({result.detail})" if result.detail else ""
-    print(f"{result.status:>8}  {result.to}{extra}{detail}")
+    print(f"{result.status:>9}  {result.to}{extra}{detail}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -139,7 +145,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.log and args.no_log:
         parser.error("--log and --no-log cannot be used together")
     if args.send and not args.log and not args.no_log:
-        parser.error("--send needs --log FILE, so an interrupted run can be resumed without emailing anyone twice")
+        parser.error(
+            "--send needs --log FILE, so an interrupted run can be resumed without emailing anyone twice "
+            "(or --no-log to send without one)"
+        )
+    if args.resume and not args.log:
+        parser.error("--resume needs --log FILE: the log of the run you are continuing")
     try:
         if args.html and len(args.html) != len(args.template):
             raise TemplateError("give --html once for each --template (same order)")
@@ -167,6 +178,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Always validate with a dry run first; it is also what --send confirms.
         preview = mail_merge(templates, args.data, dry_run=True, output_dir=args.output_dir, **common)
         _show_preview(preview, args.preview)
+        if args.log:
+            _show_log(Path(args.log))
         if not args.send:
             skipped = f", {preview.skipped} skipped" if preview.skipped else ""
             ready = preview.count("dry_run")
@@ -190,9 +203,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(f"\nDone: {report.summary()}.")
         if report.uncertain:
+            kept = "They are logged as 'uncertain', and --resume will not send them again." if args.log else ""
             print(
-                f"{report.uncertain} message(s) may or may not have arrived (the connection dropped after sending). "
-                "They are logged as 'uncertain' and --resume will not send them again.",
+                f"{report.uncertain} message(s) may or may not have arrived (the connection dropped after "
+                f"sending). {kept}".rstrip(),
                 file=sys.stderr,
             )
         return 1 if report.failed or report.uncertain else 0
@@ -203,8 +217,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
-        print("\nInterrupted. Re-run with --resume (and the same --log) to continue.", file=sys.stderr)
+        if args.no_log:
+            advice = "This run had no log, so it cannot be resumed; the messages listed as sent were delivered."
+        else:
+            advice = "Re-run with --resume (and the same --log) to continue."
+        print(f"\nInterrupted. {advice}", file=sys.stderr)
         return 130
+
+
+def _show_log(path: Path) -> None:
+    resolved = path.resolve()
+    if not resolved.exists():
+        print(f"Send log: {resolved} (new file)")
+    else:
+        print(f"Send log: {resolved} ({len(sent_addresses(resolved))} address(es) recorded as sent or uncertain)")
 
 
 def _show_preview(report: MergeReport, count: int) -> None:

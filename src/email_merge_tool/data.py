@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import csv
 import difflib
 import json
@@ -27,20 +28,23 @@ __all__ = [
 
 Record = dict[str, str]
 
-# Pragmatic syntax check: one "@", no whitespace, and a dotted domain.
-# This catches typos (missing @, "gmail,com", trailing text) but cannot tell
-# whether a mailbox exists; only delivering to it can.
-_ADDR = re.compile(r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$")
+# Pragmatic syntax check on the parsed address: a local part without spaces
+# or quotes, and a domain made of hostname labels (letters and digits in any
+# script, inner hyphens) with a non-numeric last label. This catches typos
+# ("gmail,com", "ann@x.org|2024", "'ann@x.org'") but cannot tell whether a
+# mailbox exists; only delivering to it can.
+_LOCAL_PART = re.compile(r"[^\s@\"]+")
+_DOMAIN_LABEL = re.compile(r"[^\W_](?:[^\W_]|-)*")
 
 # Longer values are rejected before parsing: the stdlib address parser recurses
 # on nested comments and is slow on long quote runs. Real addresses with a
 # display name are far shorter.
 _MAX_ADDRESS_LENGTH = 512
+_MAX_HEADER_LENGTH = 4096
 
-# A line inside a CSV cell that itself looks like a CSV row with an address:
-# the sign of an unbalanced quote that swallowed the rows below it.
-_ADDRESS_LIKE = r"[^\s@,;<>\"]+@[^\s@,;<>\"]+\.[^\s@,;<>\"]+"
-_SWALLOWED_ROW = re.compile(rf"{_ADDRESS_LIKE}.*,|,.*{_ADDRESS_LIKE}")
+# One field of a CSV row that is an address on its own.
+_LONE_ADDRESS = re.compile(r"<?[^\s@,;<>\"]+@[^\s@,;<>\"]+\.[^\s@,;<>\"]+>?")
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
 _ADDRESS_LIST_SUFFIXES = {".txt", ".csv", ".json"}
 
@@ -61,25 +65,40 @@ class Issue:
         row: 1-based data row (header excluded), or ``None`` for dataset-level issues.
         severity: ``"error"`` blocks sending; ``"warning"`` is reported only.
         message: Human-readable description.
+        where: What the issue is about when it is not a data row, e.g.
+            ``"send log"``; defaults to ``"data"``.
     """
 
     row: int | None
     severity: str
     message: str
+    where: str | None = None
 
     def __str__(self) -> str:
-        where = f"row {self.row}" if self.row is not None else "data"
+        where = f"row {self.row}" if self.row is not None else (self.where or "data")
         return f"{self.severity}: {where}: {self.message}"
 
 
-def _stringify(value: object, where: str) -> str:
+def _is_missing(value: object) -> bool:
+    """None, NaN, or a pandas missing-value marker (``pd.NA``, ``pd.NaT``)."""
     if value is None:
+        return True
+    if isinstance(value, float):
+        return value != value  # NaN, e.g. an empty pandas cell
+    return type(value).__name__ in {"NAType", "NaTType"}
+
+
+def _stringify(value: object, where: str) -> str:
+    if _is_missing(value):
         return ""
     if isinstance(value, (dict, list)):
         raise DataError(f"{where}: nested values are not supported ({type(value).__name__})")
-    if isinstance(value, float) and value != value:  # NaN, e.g. an empty pandas cell
-        return ""
     return str(value)
+
+
+def _without_invisible(text: str) -> str:
+    """Remove zero-width spaces, BOMs and other invisible format characters."""
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
 
 
 def _clean(records: Iterable[Mapping[object, object]], source: str) -> list[Record]:
@@ -137,45 +156,71 @@ def _read_csv(handle: Iterable[str], path: Path) -> list[Record]:
     # strict=True turns an unbalanced quote into an error. Without it, the csv
     # module reads every following line into one cell, so later recipients
     # vanish and their rows are mailed to the person whose cell was opened.
-    reader = csv.DictReader(handle, strict=True)
+    reader = csv.reader(handle, strict=True)
     try:
-        fieldnames = reader.fieldnames
+        raw_header = next(reader)
+    except StopIteration:
+        raise DataError(f"{path}: the CSV file is empty") from None
     except csv.Error as exc:
-        raise DataError(f"{path}: line 1: {exc}") from None
-    header = [h.strip() for h in (fieldnames or [])]
-    if not header:
+        raise DataError(f"{path}: the header row cannot be read ({exc}); check it for a stray double quote") from None
+    if any("\n" in h or "\r" in h for h in raw_header):
+        raise DataError(f"{path}: a column name spans several lines; check the header row for a stray double quote")
+    header = [h.strip() for h in raw_header]
+    if not any(header):
         raise DataError(f"{path}: the CSV file is empty")
     duplicates = sorted({h for h in header if header.count(h) > 1})
     if duplicates:
         raise DataError(f"{path}: duplicate column name(s): {', '.join(duplicates)}")
     if "" in header:
         raise DataError(f"{path}: a column has an empty name")
+    # Files written as "email, name" put a space after each comma; then a
+    # space after a comma inside a cell is no sign of prose.
+    spaced = any(h.startswith(" ") for h in raw_header[1:])
     rows: list[Record] = []
-    index = 0
     while True:
-        start = reader.line_num + 1
+        start = reader.line_num + 1  # after any blank lines skipped below
         try:
-            row = next(reader)
+            cells = next(reader)
         except StopIteration:
             break
         except csv.Error as exc:
-            raise DataError(
-                f"{path}: the record starting on line {start} cannot be read ({exc}); "
-                "check that line for an unbalanced double quote"
-            ) from None
-        index += 1
-        if None in row:  # more cells than header columns: usually an unquoted comma
-            raise DataError(f"{path}: row {index} has more fields than the header (unquoted comma?)")
-        if not any((v or "").strip() for v in row.values()):
-            continue  # skip blank lines
-        for column, value in row.items():
-            if value and "\n" in value and any(_SWALLOWED_ROW.search(line) for line in value.split("\n")[1:]):
+            hint = (
+                "text follows a closing double quote, such as a space before the comma"
+                if "expected after" in str(exc)
+                else "check that line for an unbalanced double quote"
+            )
+            raise DataError(f"{path}: the record starting on line {start} cannot be read ({exc}); {hint}") from None
+        if not any(c.strip() for c in cells):
+            continue  # blank line, or a row of empty cells
+        number = len(rows) + 1  # the row number validation reports
+        if len(cells) > len(header):  # usually an unquoted comma
+            raise DataError(f"{path}: row {number} (line {start}) has more fields than the header (unquoted comma?)")
+        cells += [""] * (len(header) - len(cells))
+        for name, value in zip(header, cells, strict=True):
+            if ("\n" in value or "\r" in value) and any(
+                _looks_like_row(line, spaced) for line in _LINE_BREAK.split(value)
+            ):
                 raise DataError(
-                    f"{path}: row {index} (line {start}), column {column.strip()!r} spans several lines that look "
-                    "like other recipients' rows; check for a stray double quote"
+                    f"{path}: row {number} (line {start}), column {name!r} holds several lines, and one of them "
+                    "looks like another recipient's row; check the quotes around that cell"
                 )
-        rows.append({k.strip(): (v or "") for k, v in row.items()})
+        rows.append(dict(zip(header, cells, strict=True)))
     return rows
+
+
+def _looks_like_row(line: str, spaced: bool) -> bool:
+    """Whether one line inside a CSV cell looks like a CSV row with an address.
+
+    That is the sign of a stray double quote that swallowed the rows after it.
+    A spreadsheet row has no space after its commas and has an address as one
+    whole field; prose such as "Cc: a@x.org, b@x.org" has spaces after them.
+    """
+    if "," not in line or "@" not in line:
+        return False
+    fields = next(csv.reader([line]))
+    if len(fields) < 2 or (not spaced and any(f.startswith(" ") for f in fields[1:])):
+        return False
+    return any("@" in f and _LONE_ADDRESS.fullmatch(f.strip()) for f in fields)
 
 
 def load_address_list(source: object, *, to_field: str = "email") -> set[str]:
@@ -200,7 +245,10 @@ def load_address_list(source: object, *, to_field: str = "email") -> set[str]:
     keys: set[str] = set()
     problems: list[str] = []
     for where, value in entries:
-        address, reason = _parse_mailbox(value)
+        # Invisible characters copied along with an address are dropped here.
+        # A recipient cell containing one fails validation instead, because
+        # the message would be addressed with the character in it.
+        address, reason = _parse_mailbox(_without_invisible(value))
         if address is None:
             problems.append(f"{where}: {value!r} is not a single valid address ({reason})")
         else:
@@ -219,9 +267,8 @@ def _collect_addresses(source: object, to_field: str, entries: list[tuple[str, s
             raise DataError(f"address list not found: {source}")
         suffix = path.suffix.lower()
         if suffix == ".txt":
-            text = path.read_text(encoding="utf-8-sig")
-            for number, line in enumerate(text.split("\n"), start=1):
-                value = "".join(ch for ch in line if unicodedata.category(ch) != "Cf").strip()
+            for number, line in enumerate(_read_text(path).split("\n"), start=1):
+                value = _without_invisible(line).strip()
                 if not value or value.startswith("#"):
                     continue
                 value = re.sub(r"\s+#.*$", "", value).rstrip(",;\t ")
@@ -241,29 +288,51 @@ def _collect_addresses(source: object, to_field: str, entries: list[tuple[str, s
         if isinstance(item, Mapping):
             if to_field not in item:
                 raise DataError(f"address list item {number} has no {to_field!r} key")
-            value = str(item[to_field] or "").strip()
+            value = _stringify(item[to_field], f"address list item {number}").strip()
             if value:
                 entries.append((f"item {number}", value))
         elif isinstance(item, Path):
             _collect_addresses(item, to_field, entries)
+        elif _is_missing(item):
+            continue
         else:
-            value = str(item).strip()
+            if isinstance(item, bytes):
+                try:
+                    value = item.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    raise DataError(f"address list item {number} is not UTF-8 text") from None
+            else:
+                value = str(item).strip()
             if not value:
                 continue
-            looks_like_file = Path(value).suffix.lower() in _ADDRESS_LIST_SUFFIXES
-            if looks_like_file and _parse_mailbox(value)[0] is None:
+            # A name like "optout@2024.csv" is both a file and a valid-looking
+            # address; an existing file wins.
+            if Path(value).suffix.lower() in _ADDRESS_LIST_SUFFIXES and (
+                Path(value).is_file() or _parse_mailbox(value)[0] is None
+            ):
                 _collect_addresses(Path(value), to_field, entries)
             else:
                 entries.append((f"item {number}", value))
 
 
+def _read_text(path: Path) -> str:
+    data = path.read_bytes()
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):  # Notepad "Unicode", PowerShell 5 ">"
+        return data.decode("utf-16")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise DataError(f"{path} is not valid UTF-8; re-save it as UTF-8") from None
+
+
 def _collect_records(records: list[Record], to_field: str, label: str, entries: list[tuple[str, str]]) -> None:
-    if records and to_field not in records[0]:
-        hint = difflib.get_close_matches(to_field, records[0].keys(), n=1)
-        suffix = f"; did you mean {hint[0]!r}?" if hint else ""
-        raise DataError(f"{label}: no {to_field!r} column{suffix}")
     for number, record in enumerate(records, start=1):
-        value = record.get(to_field, "").strip()
+        if to_field not in record:  # a JSON record can lack keys that others have
+            hint = difflib.get_close_matches(to_field, record.keys(), n=1)
+            suffix = f"; did you mean {hint[0]!r}?" if hint else ""
+            where = f"{label}: no {to_field!r} column" if number == 1 else f"{label}, row {number}: no {to_field!r} key"
+            raise DataError(where + suffix)
+        value = record[to_field].strip()
         if value:
             entries.append((f"{label}, row {number}", value))
 
@@ -284,9 +353,13 @@ def _parse_mailbox(value: str) -> tuple[Address | None, str]:
         return None, "contains a line break"
     if "@" not in text:
         return None, "no @ sign"
+    invisible = next((ch for ch in text if unicodedata.category(ch) == "Cf"), None)
+    if invisible is not None:
+        return None, f"contains an invisible character (U+{ord(invisible):04X})"
     try:
         header = policy.default.header_factory("To", text)
         groups, defects = header.groups, header.defects
+        header.fold(policy=policy.default)  # smtplib writes it this way; deep comment nesting fails here
     except Exception:  # noqa: BLE001 - the stdlib parser raises AttributeError, RecursionError and others on odd input
         return None, "cannot be parsed"
     if any(isinstance(d, NonASCIILocalPartDefect) for d in defects):
@@ -302,10 +375,9 @@ def _parse_mailbox(value: str) -> tuple[Address | None, str]:
     if groups[0].display_name is not None:
         return None, "group syntax ('name: address;')"
     address = groups[0].addresses[0]
-    if not _ADDR.match(address.addr_spec):
-        return None, "not of the form name@domain.tld"
-    if not address.username.isascii():  # newer Pythons no longer flag this as a defect
-        return None, "non-ASCII characters before the @ need SMTPUTF8, which is not supported"
+    problem = _address_problem(address)
+    if problem:
+        return None, problem
     try:
         delivered = [addr for _, addr in getaddresses([str(header)])]
     except Exception:  # noqa: BLE001
@@ -313,6 +385,53 @@ def _parse_mailbox(value: str) -> tuple[Address | None, str]:
     if delivered != [address.addr_spec]:  # smtplib derives the envelope this way
         return None, "the delivery address would differ from the written address"
     return address, ""
+
+
+def _address_problem(address: Address) -> str:
+    """What is wrong with a parsed address, or ``""`` if nothing is."""
+    local, domain = address.username, address.domain
+    if not local or not _LOCAL_PART.fullmatch(local):
+        return "not of the form name@domain.tld"
+    if not local.isascii():  # newer Pythons no longer flag this as a defect
+        return "non-ASCII characters before the @ need SMTPUTF8, which is not supported"
+    if local[0] in "'`" or local[-1] in "'`":  # e.g. Excel's text prefix: 'ann@x.org
+        return "a quote mark starts or ends the part before the @"
+    labels = domain.split(".")
+    if (
+        len(labels) < 2
+        or labels[-1].isdigit()
+        or not all(_DOMAIN_LABEL.fullmatch(label) and not label.endswith("-") for label in labels)
+    ):
+        return "the part after the @ is not a domain name like example.org"
+    return ""
+
+
+def _valid_address_list(value: str) -> bool:
+    """Whether a header value like "A <a@x.org>, b@y.org" is a clean list of valid addresses.
+
+    The value is parsed as the message header will hold it, each parsed address
+    must pass the same rules as a recipient address, and the delivery addresses
+    smtplib derives from the header must be exactly those addresses.
+    """
+    if not value.strip() or len(value) > _MAX_HEADER_LENGTH or "\r" in value or "\n" in value:
+        return False
+    if any(unicodedata.category(ch) == "Cf" for ch in value):
+        return False
+    try:
+        header = policy.default.header_factory("To", value)
+        groups, defects = header.groups, header.defects
+        addresses = [a for g in groups for a in g.addresses]
+        delivered = [addr for _, addr in getaddresses([str(header)])]
+        header.fold(policy=policy.default)
+    except Exception:  # noqa: BLE001 - the stdlib parser raises several types on odd input
+        return False
+    if any(not isinstance(d, ObsoleteHeaderDefect) for d in defects):
+        return False
+    if not addresses or any(g.display_name is not None for g in groups):
+        return False
+    if any(_address_problem(a) for a in addresses):
+        return False
+    return delivered == [a.addr_spec for a in addresses]
 
 
 def normalize_address(value: str) -> str:
