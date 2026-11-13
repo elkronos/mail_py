@@ -4,7 +4,7 @@
 
 | Source | Notes |
 | --- | --- |
-| `.csv` file | First row is the header. UTF-8, with or without a BOM (Excel's "CSV UTF-8" works). Blank lines are skipped. |
+| `.csv` file | First row is the header. UTF-8, with or without a BOM (Excel's "CSV UTF-8" works). Blank lines are skipped. Quoting is strict: an unbalanced double quote is an error that names the line, instead of silently merging the rows below it into one cell. |
 | `.json` file | A top-level array of objects: `[{"email": "...", ...}, ...]`. Nested objects or arrays are rejected. |
 | list of dicts | e.g. rows you built in Python. |
 | pandas `DataFrame` | Converted with `to_dict("records")`. `NaN` becomes an empty string. |
@@ -28,23 +28,33 @@ Before any message is built or sent, every row is checked:
 | No address appears twice (case-insensitive, display names ignored) | error, unless `allow_duplicates=True` |
 | Attachment files exist | error |
 | Rows with an unquoted comma have more cells than the header | error when loading |
+| An unbalanced double quote, a line break inside a column name, or a cell with a line that looks like another recipient's row (commas without spaces after them, and an address as one field) | error when loading |
 | A placeholder's value is empty | warning |
 
 Errors raise `DataError`. Its `.issues` attribute lists every problem, not
 just the first, so you can fix them all in one pass.
 
 !!! note "What address validation can and can't do"
-    The check is **syntactic**: one `@`, no spaces, a dotted domain, and
-    acceptance by Python's RFC 5322 address parser. It catches the typos that
-    matter in practice (`ann@gmail`, `ann gmail.com`, `ann@gmail,com`). It
-    can't tell whether a mailbox exists. Only delivery (and bounces) can,
+    The check is **syntactic**. The value is parsed the way the message's
+    `To` header will be, and must contain exactly one mailbox with a dotted
+    domain and nothing else. It catches the typos that matter in practice
+    (`ann@gmail`, `ann gmail.com`, `ann@gmail,com`), and it rejects values
+    whose message would reach a different address than the one written:
+    trailing text (`ann@x.org extra`), an unquoted comma in a name
+    (`Lee, Ann <ann@x.org>`; write `"Lee, Ann" <ann@x.org>`) and group
+    syntax. Non-ASCII characters before the `@` are rejected because sending
+    them needs SMTPUTF8. The part after the `@` must be a domain name made of
+    letters, digits and hyphens, so `ann@x.org|2024` and `'ann@x.org'` (Excel's
+    text prefix) are rejected, as are invisible characters such as a
+    zero-width space. It can't tell whether a mailbox exists. Only delivery (and bounces) can,
     and "verifying" addresses by probing mail servers is unreliable and
     frowned upon by providers.
 
 ## Address normalization
 
 For de-duplication, exclusion lists and resume, addresses are compared after
-removing any display name and lower-casing: `"Ann Lee" <Ann.Lee@Example.org>`
+removing any display name and lower-casing, using the same parser as the
+outgoing message, so the key is always the mailbox the message reaches: `"Ann Lee" <Ann.Lee@Example.org>`
 matches `ann.lee@example.org`. The email standard technically allows
 case-sensitive local parts, but no mainstream provider uses them, and treating
 two spellings as two people risks the worse error, a duplicate send.

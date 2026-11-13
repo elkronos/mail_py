@@ -90,19 +90,22 @@ Done: sent: 2, failed: 1.
 
 A permanent failure for one recipient (such as an unknown mailbox) doesn't
 stop the run. Temporary failures (4xx replies, dropped connections) are retried
-with backoff. A failed login stops the run immediately, with advice.
+with backoff, up to the point where the message has been sent; a connection
+lost after that is logged as `uncertain` rather than risking a second copy. A
+failed login stops the run immediately, with advice.
 
 ## 5. If something interrupts the run
 
-Press Ctrl-C, lose Wi-Fi, or hit your provider's daily limit, then simply
-re-run with `--resume` and the **same log file**:
+Press Ctrl-C, lose Wi-Fi, or hit your provider's daily limit, then re-run
+with `--resume` and the **same log file**:
 
 ```bash
 email-merge ... --send --log openhouse.jsonl --resume
 ```
 
-Everyone with a `sent` entry in `openhouse.jsonl` is skipped. See
-[Resume, limits and reminders](../guide/resume.md).
+Everyone with a `sent` entry in `openhouse.jsonl` is skipped. Running the
+original command again without `--resume` is refused, because the log already
+records sent messages. See [Resume, limits and reminders](../guide/resume.md).
 
 ## 6. The log is your audit trail
 

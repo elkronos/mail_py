@@ -2,7 +2,8 @@
 
 **Careful, reproducible mail merge for Python.** Write one template, point it at a
 CSV or JSON file, and send each person a personalized message. The tool checks
-everything before anything is sent, and it won't email anyone twice.
+everything before anything is sent, and it refuses to repeat a send unless you
+resume it.
 
 ```bash
 pip install git+https://github.com/elkronos/mail_py
@@ -20,7 +21,7 @@ mailings:
 | --- | --- |
 | Row 900 has a typo'd address, and you find out after 899 emails went out | **Preflight validation** checks every row, every placeholder and every attachment first. Nothing is sent unless everything passes, and near-miss column names get suggestions. |
 | You're not sure what recipients will actually see | **Dry run by default.** Preview messages in the terminal, or save them as `.eml` files that open in any mail client. |
-| The connection drops or you hit a daily quota halfway through | An append-only **send log** plus `--resume` skips everyone already sent to (by address, not row number), so re-running never sends a duplicate. |
+| The connection drops or you hit a daily quota halfway through | An append-only **send log** plus `--resume` skips everyone already sent to (by address, not row number). Re-running without `--resume` is refused, and a message whose delivery is in doubt is logged as `uncertain` instead of being sent again. |
 | You want to know which wording works better | **Randomized, stratified, reproducible assignment** of templates, with an exported assignment table and seed. See the [experiment walkthrough](tutorials/survey-experiment.md). |
 | Reminders shouldn't go to people who already responded | Pass an **exclusion list** (`--exclude responded.txt`). |
 | A name like `<b>Bob</b>` breaks your HTML, or a newline in a field injects a header | Values are **HTML-escaped** in HTML bodies, and **line breaks in headers are rejected**. |

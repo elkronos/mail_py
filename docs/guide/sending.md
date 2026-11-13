@@ -64,7 +64,13 @@ deliverability and higher limits. All of them offer SMTP, so use `--host`,
   for provider throttling.
 - **Temporary** failures (4xx replies, dropped connections, timeouts) are
   retried up to 3 times with exponential backoff (2 s, 4 s, 8 s), reconnecting
-  as needed.
+  as needed, but only until the whole message has been written to the
+  server. If the connection drops after that, or the reply is cut short or
+  garbled, the server may already have the message, so it is logged as
+  `uncertain` and not sent again. Pressing Ctrl-C while waiting for that reply
+  logs it as `uncertain` too. A clear 4xx reply means the server did not
+  take the message, so it is retried. The tool waits up to 10 minutes for the
+  server's reply to the message content (RFC 5321).
 - **Permanent** failures for one recipient (5xx) are recorded as `failed`, and
   the run continues.
 - **Fatal** failures (can't connect, login rejected) stop the run with a clear

@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from email.errors import MessageError
 from email.message import EmailMessage
-from email.utils import formataddr, getaddresses
 from pathlib import Path
 
 from .data import (
     DataError,
     Issue,
+    _valid_address_list,
     is_valid_address,
     load_address_list,
     load_recipients,
@@ -23,7 +24,7 @@ from .experiment import Assignment, assign_variants, write_assignments
 from .message import build_message
 from .sendlog import SendLog, sent_addresses
 from .templates import Template, TemplateError, fill, load_template, placeholders
-from .transport import DryRunTransport, FatalSendError, PermanentSendError, Transport
+from .transport import DryRunTransport, FatalSendError, PermanentSendError, Transport, UncertainSendError
 
 __all__ = ["mail_merge", "MergeReport", "Result"]
 
@@ -37,7 +38,10 @@ class Result:
     """Outcome for one recipient."""
 
     to: str
-    status: str  # "sent", "dry_run", "failed", "skipped"
+    # "sent", "dry_run", "failed", "skipped", or "uncertain": the connection
+    # dropped after the message data went out, so the server may have accepted
+    # it. Uncertain messages are not retried, and resume skips them.
+    status: str
     variant: str | None = None
     message_id: str | None = None
     detail: str = ""
@@ -74,8 +78,13 @@ class MergeReport:
     def skipped(self) -> int:
         return self.count("skipped")
 
+    @property
+    def uncertain(self) -> int:
+        return self.count("uncertain")
+
     def summary(self) -> str:
-        parts = [f"{s}: {self.count(s)}" for s in ("sent", "dry_run", "failed", "skipped") if self.count(s)]
+        statuses = ("sent", "dry_run", "failed", "uncertain", "skipped")
+        parts = [f"{s}: {self.count(s)}" for s in statuses if self.count(s)]
         return ", ".join(parts) or "nothing to do"
 
 
@@ -112,7 +121,7 @@ def mail_merge(
     weights: Sequence[float] | None = None,
     variant_field: str | None = None,
     assignments_path: str | Path | None = None,
-    exclude: Iterable[str] | str | Path | None = None,
+    exclude: object = None,
     log_path: str | Path | None = None,
     resume: bool = False,
     limit: int | None = None,
@@ -149,10 +158,16 @@ def mail_merge(
         variant_field: Column naming the template for each row, if you did the
             assignment yourself (mutually exclusive with ``seed``).
         assignments_path: Write the assignment table (CSV) here.
-        exclude: Addresses to skip (e.g. people who already responded), as an
-            iterable, or a ``.txt``/``.csv``/``.json`` file.
+        exclude: Addresses to skip (e.g. people who already responded): a
+            ``.txt``/``.csv``/``.json`` file, a DataFrame, or a list of
+            addresses, records or file paths. Every entry must be a valid
+            address; see :func:`load_address_list`.
         log_path: JSON Lines send log (audit trail; required for ``resume``).
-        resume: Skip recipients the log already records as ``sent``.
+            If the file already records sent messages, ``resume=True`` is
+            required, so running the same command twice cannot email
+            everyone twice.
+        resume: Skip recipients the log already records as ``sent`` (or
+            ``uncertain``).
         limit: Send at most this many messages this run (e.g. a daily quota).
         min_interval: Seconds to wait between messages (rate limiting).
         list_unsubscribe: ``List-Unsubscribe`` header value; may contain
@@ -170,7 +185,9 @@ def mail_merge(
         A :class:`MergeReport`.
 
     Raises:
-        DataError: validation found errors (see ``exc.issues``); nothing was sent.
+        DataError: validation found errors (see ``exc.issues``), or the send
+            log already records sent messages and ``resume`` is false;
+            nothing was sent.
         FatalSendError: the connection or login failed; see the log for what
             was already sent, and re-run with ``resume=True``.
     """
@@ -197,12 +214,26 @@ def mail_merge(
     if attachment_field:
         fields.add(attachment_field)
     issues = validate_recipients(records, fields, to_field=to_field, allow_duplicates=allow_duplicates)
+    keys = {normalize_address(r.get(to_field) or "") for r in records}
     skip: set[str] = set()
     if exclude is not None:
         try:
             skip = load_address_list(exclude, to_field=to_field)
         except DataError as exc:
-            issues.insert(0, Issue(None, "error", f"exclude list: {exc}"))
+            issues.insert(0, Issue(None, "error", str(exc).replace("\n", "\n    "), where="exclude list"))
+        else:
+            if not skip:
+                issues.append(
+                    Issue(None, "warning", "it holds no addresses, so nobody is excluded", where="exclude list")
+                )
+            elif not skip & keys:
+                note = f"none of its {len(skip)} address(es) is in the recipient data"
+                issues.append(Issue(None, "warning", note, where="exclude list"))
+    already: set[str] = set()
+    if log_path is not None:
+        already, log_issue = _check_send_log(Path(log_path), resume, keys)
+        if log_issue is not None:
+            issues.insert(0, log_issue)
     if sender and not is_valid_address(sender):
         issues.insert(0, Issue(None, "error", f"invalid sender address {sender!r}"))
     if not sender and any("From" not in t.headers for t in tpls.values()):
@@ -222,6 +253,8 @@ def mail_merge(
     errors = [i for i in issues if i.severity == "error"]
     if errors:
         raise DataError(_describe(errors), errors)
+    for issue in report.issues:  # so a caller of the API sees them before anything is sent
+        logger.warning("%s", issue)
 
     if len(tpls) > 1 and seed is not None:
         report.assignments = assign_variants(
@@ -240,7 +273,7 @@ def mail_merge(
         try:
             rendered = tpls[variant].render(record, to_field=to_field)
             for name, value in rendered.headers.items():
-                if value and not all(is_valid_address(v) for v in _split_addresses(value)):
+                if value and not _valid_address_list(value):
                     raise TemplateError(f"invalid address in {name}: {value!r}")
             unsub = fill(list_unsubscribe, record) if list_unsubscribe else None
             files = [Path(p) for p in attachments]
@@ -256,6 +289,16 @@ def mail_merge(
                 one_click_unsubscribe=one_click_unsubscribe,
                 attachments=files,
             )
+            for name, value in message.items():  # what smtplib's generator does; fails here, not mid-run
+                try:
+                    message.policy.fold_binary(name, value)
+                except MessageError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - RecursionError, IndexError and others on odd input
+                    raise MessageError(f"{name}: {str(exc) or type(exc).__name__}") from exc
+        except MessageError as exc:
+            errors.append(Issue(row, "error", f"a header cannot be written: {exc}"))
+            continue
         except (TemplateError, ValueError, OSError) as exc:
             errors.append(Issue(row, "error", str(exc)))
             continue
@@ -263,10 +306,28 @@ def mail_merge(
     if errors:
         raise DataError(_describe(errors), errors)
 
-    already = sent_addresses(log_path) if resume and log_path is not None else set()
+    if not resume:
+        already = set()
+
+    log: SendLog | None = None
+    if log_path is not None and not dry_run:
+        # Hold the log for the whole run, and read it again under the lock:
+        # another run may have sent and logged since validation.
+        log = SendLog(log_path)
+        try:
+            log.lock()
+            current = sent_addresses(log_path)
+        except BaseException:
+            log.close()
+            raise
+        if current and not resume:
+            log.close()
+            issue = _reuse_issue(Path(log_path), current)
+            raise DataError(_describe([issue]), [issue])
+        if resume:
+            already = current
 
     active: Transport = transport if (transport is not None and not dry_run) else DryRunTransport(output_dir)
-    log = SendLog(log_path) if log_path is not None else None
     delivered = 0
     try:
         active.open()
@@ -274,20 +335,32 @@ def mail_merge(
             key = normalize_address(to)
             variant_label = variant if len(tpls) > 1 else None
             if key in skip or key in already:
-                reason = "excluded" if key in skip else "already sent (resume)"
+                reason = "excluded" if key in skip else "already in the send log"
                 result = Result(to, "skipped", variant_label, detail=reason)
             elif limit is not None and delivered >= limit:
                 result = Result(to, "skipped", variant_label, detail="limit reached")
             else:
                 if delivered and min_interval and not dry_run:
                     time.sleep(min_interval)
-                result = _deliver(active, message, to, variant_label, dry_run)
-                if result.status in {"sent", "dry_run"}:
+                try:
+                    result = _deliver(active, message, to, variant_label, dry_run)
+                except BaseException:
+                    if log is not None and getattr(active, "unconfirmed", False):  # e.g. Ctrl-C awaiting the reply
+                        log.write(
+                            to=to,
+                            status="uncertain",
+                            variant=variant_label,
+                            message_id=str(message["Message-ID"]),
+                            detail="interrupted after the message was sent; it may have arrived",
+                            seed=seed,
+                        )
+                    raise
+                if result.status in {"sent", "dry_run", "uncertain"}:  # an uncertain one most likely went out
                     delivered += 1
                 if dry_run:
                     report.messages.append(message)
             report.results.append(result)
-            if log is not None and not dry_run:
+            if log is not None:
                 log.write(
                     to=to,
                     status=result.status,
@@ -305,10 +378,55 @@ def mail_merge(
     return report
 
 
+def _check_send_log(path: Path, resume: bool, keys: set[str]) -> tuple[set[str], Issue | None]:
+    """Read the send log before a run, and say what is wrong with using it.
+
+    Returns the addresses the log records as sent or uncertain, and an issue:
+    an error when reusing the log could email people twice (or when a resume
+    would skip nobody because the log is missing or belongs to other people),
+    or a warning when a resume finds nothing to skip.
+    """
+    logged = sent_addresses(path)
+    if not resume:
+        return logged, _reuse_issue(path, logged) if logged else None
+    if not path.exists():
+        return logged, Issue(
+            None,
+            "error",
+            f"{path} does not exist, so resuming would skip nobody; check the file name "
+            "(leave out --resume for the first run of a mailing)",
+            where="send log",
+        )
+    if not logged:
+        return logged, Issue(None, "warning", f"{path} records no sent messages yet", where="send log")
+    if not logged & keys:
+        return logged, Issue(
+            None,
+            "error",
+            f"{path} records {len(logged)} address(es), and none of them is in this recipient data; "
+            "check that it is the log of this mailing",
+            where="send log",
+        )
+    return logged, None
+
+
+def _reuse_issue(path: Path, logged: set[str]) -> Issue:
+    return Issue(
+        None,
+        "error",
+        f"{path} already records {len(logged)} sent or uncertain address(es); resume to skip them "
+        "(--resume, or resume=True), or use a new log file for a new mailing",
+        where="send log",
+    )
+
+
 def _deliver(transport: Transport, message: EmailMessage, to: str, variant: str | None, dry_run: bool) -> Result:
     message_id = str(message["Message-ID"])
     try:
         refused = transport.send(message)
+    except UncertainSendError as exc:
+        logger.warning("delivery to %s is uncertain: %s", to, exc)
+        return Result(to, "uncertain", variant, message_id, str(exc))
     except PermanentSendError as exc:
         logger.warning("failed to send to %s: %s", to, exc)
         return Result(to, "failed", variant, message_id, str(exc))
@@ -316,11 +434,6 @@ def _deliver(transport: Transport, message: EmailMessage, to: str, variant: str 
         raise
     detail = f"some recipients refused: {refused}" if refused else ""
     return Result(to, "dry_run" if dry_run else "sent", variant, message_id, detail)
-
-
-def _split_addresses(value: str) -> list[str]:
-    """Split a header like "A <a@x.org>, b@y.org" into single addresses."""
-    return [formataddr(pair) for pair in getaddresses([value])]
 
 
 def _describe(errors: Sequence[Issue], shown: int = 20) -> str:

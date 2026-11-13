@@ -5,8 +5,8 @@
 
 **Careful, reproducible mail merge for Python.** Write one template, point it at
 a CSV or JSON file, and send each person a personalized message. The tool
-validates everything before anything is sent, never emails anyone twice, and
-supports randomized message experiments.
+validates everything before anything is sent, refuses to repeat a send unless
+you resume it, and supports randomized message experiments.
 
 **Documentation and walkthroughs: <https://elkronos.github.io/mail_py/>**
 
@@ -14,7 +14,7 @@ supports randomized message experiments.
 
 - **Dry run by default.** Preview messages, or save them as `.eml` files, before sending.
 - **Preflight validation** of every row, placeholder and attachment, with "did you mean" hints. Nothing is sent if anything is wrong.
-- **Crash-safe resume.** An address-keyed send log means re-running never double-sends.
+- **Crash-safe resume.** An address-keyed send log lets `--resume` skip everyone already sent to, and a repeated send without `--resume` is refused.
 - **Randomized experiments.** Reproducible, stratified assignment of message variants, with an exported assignment table.
 - **Reminder waves** that skip people who already responded.
 - **Safe by default.** HTML-escaped values, header-injection blocking, verified TLS, and no passwords on the command line.

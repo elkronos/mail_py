@@ -38,4 +38,4 @@ feature set focused. Choose another tool when you need:
   lot of memory.
 - Bounces that arrive later by email (asynchronous bounces) aren't collected.
   Only rejections during the SMTP conversation are logged as `failed`.
-- There is no built-in scheduling. Use cron or Task Scheduler with `--resume --limit`.
+- There is no built-in scheduling. Use cron or Task Scheduler with `--resume --limit`, after a first run without `--resume`.

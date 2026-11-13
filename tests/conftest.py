@@ -11,8 +11,11 @@ class FakeSMTP:
     """Stands in for smtplib.SMTP / SMTP_SSL and records what was sent."""
 
     instances: list["FakeSMTP"] = []
-    # Scripted failures: list of exceptions raised by successive send_message calls.
-    failures: list[Exception] = []
+    # Scripted outcomes of successive send_message calls: None succeeds, an
+    # exception is raised before DATA, ("payload", exc) raises exc while the
+    # message is being written, and ("after_data", exc) delivers the message
+    # and then raises exc, as when the server's final reply is lost.
+    failures: list = []
     login_error: Exception | None = None
 
     def __init__(self, host, port, timeout=None, context=None):
@@ -21,6 +24,7 @@ class FakeSMTP:
         self.logged_in = None
         self.tls = context is not None
         self.closed = False
+        self.payload_error = None
         FakeSMTP.instances.append(self)
 
     def starttls(self, context=None):
@@ -34,13 +38,46 @@ class FakeSMTP:
     def send_message(self, msg):
         if FakeSMTP.failures:
             error = FakeSMTP.failures.pop(0)  # None means "this call succeeds"
+            if isinstance(error, tuple) and error[0] == "payload":
+                self.payload_error = error[1]
+                self.data(msg)  # raises from the second write
+            if isinstance(error, tuple):
+                self.data(msg)  # like smtplib: goes through the instance's data()
+                exc = error[1]
+                rejected = isinstance(exc, smtplib.SMTPResponseException) and 400 <= exc.smtp_code < 600
+                if not rejected:  # the server queued it, but its reply never arrived
+                    self.sent.append(msg)
+                raise exc
             if error is not None:
                 raise error
+        self.data(msg)
         self.sent.append(msg)
         return {}
 
+    def data(self, msg):
+        # smtplib's data() writes the DATA command, then the message.
+        self.send(b"DATA\r\n")
+        self.send(b"message\r\n.\r\n")
+        return (250, b"queued")
+
+    def send(self, payload):
+        if payload != b"DATA\r\n" and self.payload_error is not None:
+            error, self.payload_error = self.payload_error, None
+            raise error
+
+    def close(self):
+        self.closed = True
+
     def quit(self):
         self.closed = True
+
+
+@pytest.fixture(autouse=True)
+def no_hostname_lookup(monkeypatch):
+    # smtplib names the local host for EHLO with socket.getfqdn(), a DNS
+    # lookup that takes tens of seconds on some CI runners (macOS). The name
+    # needs a dot, or smtplib falls back to a second lookup.
+    monkeypatch.setattr("socket.getfqdn", lambda name="": "localhost.localdomain")
 
 
 @pytest.fixture

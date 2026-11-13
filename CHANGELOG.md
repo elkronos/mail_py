@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- A CSV with an unbalanced double quote no longer merges the rows below it into one cell, which dropped those recipients and mailed their data to one person. Quoting is now strict, and a cell that has swallowed other rows is an error that names the line.
+- Exclusion lists are validated entry by entry. A line such as `ann@example.org, responded`, a list of file names, records, or a DataFrame used to exclude nobody without any warning; files and records now work, and an entry that is not one valid address stops the run with its line number. A warning is shown when no excluded address is in the recipient data.
+- Address validation, de-duplication, exclusion and resume now use the parser that builds the `To` header. Values such as `ann@example.org extra` validated with a key that differed from the mailbox the message went to, which bypassed exclusion lists and allowed duplicate sends. Overlong or deeply nested input no longer crashes the parser.
+- A send that reuses a log already recording sent messages is refused unless it resumes, so repeating a command with the same log cannot email everyone again. Resuming from a log that does not exist, or whose addresses are all missing from the data, is an error. A run locks its log while sending, so two runs cannot use one log at once. A torn last line in the log no longer swallows the next record. Dry runs no longer create the log file.
+- A connection lost, or a reply cut short or garbled, after the whole message was written is no longer retried, since the server may already have the message. The row is logged as `uncertain` and resume skips it; Ctrl-C while waiting for that reply logs it the same way. Failures before the message is fully written are still retried. The reply to the message content is awaited for up to 10 minutes (RFC 5321).
+
+### Changed
+- `email-merge --send` requires `--log FILE`, or `--no-log` to send without one.
+- New result and log status `uncertain`, new exception `UncertainSendError`, and `MergeReport.uncertain`. The CLI exits with 1 when any message is uncertain.
+- Addresses with non-ASCII characters before the `@` are rejected at validation on every Python version. Python 3.15 had started accepting them, which sent them only through servers offering SMTPUTF8.
+- `load_address_list` and `normalize_address` are exported from the package.
+- The domain of an address must be letters, digits and hyphens, and invisible characters are rejected, so annotated entries such as `ann@example.org|2024` no longer count as addresses.
+- `Issue` has an optional `where` label. The CLI preview shows the send log's full path, and `--resume` needs `--log`.
+- Messages logged `uncertain` count toward `limit`. Exclusion lists may be UTF-16 text files, and missing values in a list are skipped.
+- `Cc`, `Bcc`, `Reply-To` and `From` values follow the same address rules as recipients, and every header is checked to be writable before sending, so a bad header fails validation instead of stopping a run partway. `SMTPTransport(data_timeout=None)` waits without a limit.
+
 ## 0.2.0
 
 A rewrite. Version 0.1 could not be imported and its placeholder substitution

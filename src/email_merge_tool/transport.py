@@ -7,9 +7,10 @@ import smtplib
 import ssl
 import time
 from dataclasses import dataclass
+from email.errors import MessageError
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 __all__ = [
     "PRESETS",
@@ -18,6 +19,7 @@ __all__ = [
     "SMTPTransport",
     "DryRunTransport",
     "PermanentSendError",
+    "UncertainSendError",
     "FatalSendError",
 ]
 
@@ -36,6 +38,14 @@ PRESETS: dict[str, tuple[str, int, str]] = {
 
 class PermanentSendError(Exception):
     """This one message cannot be delivered (e.g. 5xx: recipient rejected)."""
+
+
+class UncertainSendError(PermanentSendError):
+    """The connection failed after the message data was sent.
+
+    The server may already have accepted and queued the message, so it is not
+    retried: a retry here is how one person ends up with several copies.
+    """
 
 
 class FatalSendError(Exception):
@@ -95,19 +105,92 @@ class Transport(Protocol):
     def close(self) -> None: ...
 
 
+class _DataPhase:
+    """Track whether the whole message has been written to an SMTP connection.
+
+    ``smtplib``'s ``send_message`` calls the connection's ``data()`` method
+    once MAIL and RCPT have succeeded, and ``data()`` writes twice: the DATA
+    command, then the message ending in ``"\\r\\n.\\r\\n"``. Shadowing ``data()``
+    and ``send()`` on this one instance marks the moment the second write
+    completes. From then on the server may have the message. The socket
+    timeout is raised for the server's reply to it.
+    """
+
+    def __init__(self, smtp: smtplib.SMTP, timeout: float | None) -> None:
+        self.sent = False
+        self._smtp = smtp
+        self._timeout = timeout
+
+    def __enter__(self) -> _DataPhase:
+        smtp = self._smtp
+        original_data = getattr(smtp, "data", None)
+        original_send = getattr(smtp, "send", None)
+        if original_data is None or original_send is None:
+            return self
+
+        def data(msg: Any) -> Any:
+            writes = 0
+            sock: Any = None
+            previous: float | None = None
+
+            def send(payload: Any) -> None:
+                nonlocal writes, sock, previous
+                original_send(payload)
+                writes += 1
+                if writes == 2:  # the DATA command, then the message itself
+                    self.sent = True
+                    sock = getattr(smtp, "sock", None)
+                    previous = sock.gettimeout() if sock is not None else None
+                    if previous is not None:
+                        sock.settimeout(None if self._timeout is None else max(previous, self._timeout))
+
+            setattr(smtp, "send", send)  # noqa: B010 - shadows the method on this instance only
+            try:
+                return original_data(msg)
+            finally:
+                vars(smtp).pop("send", None)
+                current = getattr(smtp, "sock", None)
+                if previous is not None and current is not None and current is sock:  # still connected
+                    current.settimeout(previous)
+
+        setattr(smtp, "data", data)  # noqa: B010 - shadows the method on this instance only
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        vars(self._smtp).pop("data", None)
+        vars(self._smtp).pop("send", None)
+
+
 class SMTPTransport:
     """Deliver over SMTP with TLS, automatic reconnection, and retries.
 
     Temporary failures (SMTP 4xx replies, dropped connections) are retried up
-    to ``max_retries`` times with exponential backoff. Permanent 5xx replies
-    for a recipient raise :class:`PermanentSendError` so the run can continue
-    with the next person. Authentication failures raise :class:`FatalSendError`.
+    to ``max_retries`` times with exponential backoff, but only until the
+    message data has been sent. A connection lost after that raises
+    :class:`UncertainSendError` instead, because the server may already have
+    the message. Permanent 5xx replies for a recipient raise
+    :class:`PermanentSendError` so the run can continue with the next person.
+    Authentication failures raise :class:`FatalSendError`.
+
+    Args:
+        config: Server settings.
+        max_retries: Retries for a temporary failure before the message data
+            is sent.
+        backoff: Base of the exponential delay between retries, in seconds.
+        data_timeout: Seconds to wait for the server's reply after the
+            message data (RFC 5321 section 4.5.3.2.6 recommends 10 minutes).
     """
 
-    def __init__(self, config: SMTPConfig, *, max_retries: int = 3, backoff: float = 2.0) -> None:
+    def __init__(
+        self, config: SMTPConfig, *, max_retries: int = 3, backoff: float = 2.0, data_timeout: float | None = 600.0
+    ) -> None:
         self.config = config
         self.max_retries = max_retries
         self.backoff = backoff
+        self.data_timeout = data_timeout
+        #: True when the last send was interrupted (e.g. Ctrl-C) after the
+        #: message was written, so it may have been delivered.
+        self.unconfirmed = False
         self._smtp: smtplib.SMTP | None = None
 
     def open(self) -> None:
@@ -145,29 +228,66 @@ class SMTPTransport:
         Returns:
             Recipients the server refused while accepting the message for the
             others (e.g. a bad Cc). The message *was* sent when this returns.
+
+        Raises:
+            PermanentSendError: the server rejected the message, or temporary
+                failures persisted through ``max_retries`` retries.
+            UncertainSendError: the connection failed after the message data
+                was sent; the message may have been delivered.
         """
         attempt = 0
+        self.unconfirmed = False
         while True:
+            phase: _DataPhase | None = None
             try:
                 if self._smtp is None:
                     self.open()
                 assert self._smtp is not None
-                return self._smtp.send_message(message)
+                phase = _DataPhase(self._smtp, self.data_timeout)
+                with phase:
+                    return self._smtp.send_message(message)
             except smtplib.SMTPRecipientsRefused as exc:
                 raise PermanentSendError(f"recipient refused: {exc.recipients}") from exc
-            except (smtplib.SMTPServerDisconnected, ConnectionError, TimeoutError) as exc:
-                self._smtp = None  # reconnect on the next attempt
-                error: Exception = exc
             except smtplib.SMTPResponseException as exc:
                 if 500 <= exc.smtp_code < 600:
                     raise PermanentSendError(f"{exc.smtp_code} {exc.smtp_error!r}") from exc
                 self.close()  # e.g. 421: the server is closing the connection
+                if phase is not None and phase.sent and not 400 <= exc.smtp_code < 500:
+                    # Only a 4xx reply says the server did not take the message. A
+                    # reply cut short, garbled or otherwise unexpected says nothing.
+                    raise UncertainSendError(
+                        f"unclear reply after the message was sent ({exc.smtp_code} {exc.smtp_error!r}); "
+                        "the server may have accepted it, so it was not sent again"
+                    ) from exc
+                error: Exception = exc
+            except smtplib.SMTPNotSupportedError as exc:  # e.g. SMTPUTF8 needed but not offered
+                raise PermanentSendError(str(exc)) from exc
+            except OSError as exc:  # dropped connection, timeout, TLS failure (smtplib errors are OSErrors too)
+                self._smtp = None  # reconnect on the next attempt
+                if phase is not None and phase.sent:
+                    raise UncertainSendError(
+                        f"connection lost after the message was sent ({str(exc) or type(exc).__name__}); "
+                        "the server may have accepted it, so it was not sent again"
+                    ) from exc
                 error = exc
+            except MessageError as exc:  # a header the generator cannot write
+                raise PermanentSendError(f"the message cannot be written: {exc}") from exc
+            except BaseException:  # Ctrl-C and the like: let the caller log it if it may have arrived
+                self.unconfirmed = phase is not None and phase.sent
+                if self._smtp is not None:
+                    try:
+                        self._smtp.close()  # the conversation is out of step; do not reuse it
+                    except OSError:
+                        pass
+                    self._smtp = None
+                raise
             attempt += 1
             if attempt > self.max_retries:
-                raise PermanentSendError(f"gave up after {self.max_retries} retries: {error}") from error
+                raise PermanentSendError(
+                    f"gave up after {self.max_retries} retries: {str(error) or type(error).__name__}"
+                ) from error
             delay = self.backoff**attempt
-            logger.warning("temporary failure (%s); retrying in %.0fs", error, delay)
+            logger.warning("temporary failure (%s); retrying in %.0fs", str(error) or type(error).__name__, delay)
             time.sleep(delay)
 
     def __enter__(self) -> SMTPTransport:

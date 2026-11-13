@@ -30,6 +30,10 @@ Everything below can be imported from `email_merge_tool`.
 
 ::: email_merge_tool.is_valid_address
 
+::: email_merge_tool.normalize_address
+
+::: email_merge_tool.load_address_list
+
 ::: email_merge_tool.Issue
 
 ::: email_merge_tool.DataError
@@ -53,6 +57,8 @@ Everything below can be imported from `email_merge_tool`.
 ::: email_merge_tool.build_message
 
 ::: email_merge_tool.PermanentSendError
+
+::: email_merge_tool.UncertainSendError
 
 ::: email_merge_tool.FatalSendError
 

@@ -55,6 +55,8 @@ def test_send_confirmation_can_abort(files, fake_smtp, monkeypatch):
             "--host",
             "localhost",
             "--send",
+            "--log",
+            str(files / "log.jsonl"),
         ]
     )
     assert code == 1 and fake_smtp.instances == []
@@ -94,7 +96,7 @@ def test_no_auth_relay_does_not_prompt(files, fake_smtp, monkeypatch):
     monkeypatch.delenv("EMAIL_MERGE_PASSWORD", raising=False)
     monkeypatch.setattr("getpass.getpass", lambda prompt: pytest.fail("prompted for a password"))
     args = ["-t", str(files / "invite.txt"), "-d", str(files / "people.csv"), "--from", "t@example.org"]
-    code = main([*args, "--host", "relay.example.org", "--port", "25", "--no-auth", "--send", "--yes"])
+    code = main([*args, "--host", "relay.example.org", "--port", "25", "--no-auth", "--send", "--yes", "--no-log"])
     assert code == 0
     conn = fake_smtp.instances[0]
     assert (conn.host, conn.port, conn.logged_in) == ("relay.example.org", 25, None)
@@ -106,3 +108,55 @@ def test_send_without_server_fails_before_anything(files, fake_smtp, capsys):
     assert info.value.code == 2
     assert "--send needs --service or --host" in capsys.readouterr().err
     assert fake_smtp.instances == []
+
+
+def _send_args(files, *extra):
+    return [
+        "-t",
+        str(files / "invite.txt"),
+        "-d",
+        str(files / "people.csv"),
+        "--from",
+        "t@example.org",
+        "--host",
+        "relay.example.org",
+        "--no-auth",
+        "--send",
+        "--yes",
+        *extra,
+    ]
+
+
+def test_send_requires_a_log(files, fake_smtp, capsys):
+    with pytest.raises(SystemExit) as info:
+        main(_send_args(files))
+    assert info.value.code == 2
+    assert "--send needs --log FILE" in capsys.readouterr().err
+    assert fake_smtp.instances == []
+    with pytest.raises(SystemExit):
+        main(_send_args(files, "--log", str(files / "l.jsonl"), "--no-log"))
+
+
+def test_repeating_a_send_without_resume_sends_nothing(files, fake_smtp, capsys):
+    log = str(files / "sent.jsonl")
+    assert main(_send_args(files, "--log", log)) == 0
+    assert len(fake_smtp.instances[0].sent) == 2
+    capsys.readouterr()
+
+    assert main(_send_args(files, "--log", log)) == 2  # the same command again
+    assert "already records 2 sent or uncertain address(es)" in capsys.readouterr().err
+    assert len(fake_smtp.instances) == 1  # never reconnected
+
+    assert main(_send_args(files, "--log", log, "--resume")) == 0
+    assert sum(len(c.sent) for c in fake_smtp.instances) == 2  # nobody got a second copy
+
+
+def test_resume_needs_a_log_and_the_preview_shows_it(files, fake_smtp, capsys):
+    with pytest.raises(SystemExit):
+        main(_send_args(files, "--no-log", "--resume"))
+    assert "--resume needs --log FILE" in capsys.readouterr().err
+    log = files / "sent.jsonl"
+    assert main(_send_args(files, "--log", str(log))) == 0
+    assert f"Send log: {log.resolve()} (new file)" in capsys.readouterr().out
+    assert main(_send_args(files, "--log", str(log), "--resume")) == 0
+    assert "(2 address(es) recorded as sent or uncertain)" in capsys.readouterr().out
