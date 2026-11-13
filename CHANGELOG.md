@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- A CSV with an unbalanced double quote no longer merges the rows below it into one cell, which dropped those recipients and mailed their data to one person. Quoting is now strict, and a cell that has swallowed other rows is an error that names the line.
+- Exclusion lists are validated entry by entry. A line such as `ann@example.org, responded`, a list of file names, records, or a DataFrame used to exclude nobody without any warning; files and records now work, and an entry that is not one valid address stops the run with its line number. A warning is shown when no excluded address is in the recipient data.
+- Address validation, de-duplication, exclusion and resume now use the parser that builds the `To` header. Values such as `ann@example.org extra` validated with a key that differed from the mailbox the message went to, which bypassed exclusion lists and allowed duplicate sends. Overlong or deeply nested input no longer crashes the parser.
+- A send that reuses a log already recording sent messages is refused unless it resumes, so repeating a command cannot email everyone again. With `resume`, a missing or empty log produces a warning.
+- A connection lost after the message content was sent is no longer retried, since the server may already have the message. The row is logged as `uncertain` and resume skips it. The reply to the message content is awaited for up to 10 minutes (RFC 5321).
+
+### Changed
+- `email-merge --send` requires `--log FILE`, or `--no-log` to send without one.
+- New result and log status `uncertain`, new exception `UncertainSendError`, and `MergeReport.uncertain`. The CLI exits with 1 when any message is uncertain.
+- Addresses with non-ASCII characters before the `@` are rejected at validation instead of failing during the send.
+- `load_address_list` and `normalize_address` are exported from the package.
+
 ## 0.2.0
 
 A rewrite. Version 0.1 could not be imported and its placeholder substitution

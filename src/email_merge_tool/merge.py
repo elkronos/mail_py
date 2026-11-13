@@ -6,8 +6,9 @@ import logging
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from email import policy
+from email.errors import ObsoleteHeaderDefect
 from email.message import EmailMessage
-from email.utils import formataddr, getaddresses
 from pathlib import Path
 
 from .data import (
@@ -23,7 +24,7 @@ from .experiment import Assignment, assign_variants, write_assignments
 from .message import build_message
 from .sendlog import SendLog, sent_addresses
 from .templates import Template, TemplateError, fill, load_template, placeholders
-from .transport import DryRunTransport, FatalSendError, PermanentSendError, Transport
+from .transport import DryRunTransport, FatalSendError, PermanentSendError, Transport, UncertainSendError
 
 __all__ = ["mail_merge", "MergeReport", "Result"]
 
@@ -37,7 +38,10 @@ class Result:
     """Outcome for one recipient."""
 
     to: str
-    status: str  # "sent", "dry_run", "failed", "skipped"
+    # "sent", "dry_run", "failed", "skipped", or "uncertain": the connection
+    # dropped after the message data went out, so the server may have accepted
+    # it. Uncertain messages are not retried, and resume skips them.
+    status: str
     variant: str | None = None
     message_id: str | None = None
     detail: str = ""
@@ -74,8 +78,13 @@ class MergeReport:
     def skipped(self) -> int:
         return self.count("skipped")
 
+    @property
+    def uncertain(self) -> int:
+        return self.count("uncertain")
+
     def summary(self) -> str:
-        parts = [f"{s}: {self.count(s)}" for s in ("sent", "dry_run", "failed", "skipped") if self.count(s)]
+        statuses = ("sent", "dry_run", "failed", "uncertain", "skipped")
+        parts = [f"{s}: {self.count(s)}" for s in statuses if self.count(s)]
         return ", ".join(parts) or "nothing to do"
 
 
@@ -149,10 +158,16 @@ def mail_merge(
         variant_field: Column naming the template for each row, if you did the
             assignment yourself (mutually exclusive with ``seed``).
         assignments_path: Write the assignment table (CSV) here.
-        exclude: Addresses to skip (e.g. people who already responded), as an
-            iterable, or a ``.txt``/``.csv``/``.json`` file.
+        exclude: Addresses to skip (e.g. people who already responded): a
+            ``.txt``/``.csv``/``.json`` file, a DataFrame, or a list of
+            addresses, records or file paths. Every entry must be a valid
+            address; see :func:`load_address_list`.
         log_path: JSON Lines send log (audit trail; required for ``resume``).
-        resume: Skip recipients the log already records as ``sent``.
+            If the file already records sent messages, ``resume=True`` is
+            required, so running the same command twice cannot email
+            everyone twice.
+        resume: Skip recipients the log already records as ``sent`` (or
+            ``uncertain``).
         limit: Send at most this many messages this run (e.g. a daily quota).
         min_interval: Seconds to wait between messages (rate limiting).
         list_unsubscribe: ``List-Unsubscribe`` header value; may contain
@@ -170,7 +185,9 @@ def mail_merge(
         A :class:`MergeReport`.
 
     Raises:
-        DataError: validation found errors (see ``exc.issues``); nothing was sent.
+        DataError: validation found errors (see ``exc.issues``), or the send
+            log already records sent messages and ``resume`` is false;
+            nothing was sent.
         FatalSendError: the connection or login failed; see the log for what
             was already sent, and re-run with ``resume=True``.
     """
@@ -203,6 +220,26 @@ def mail_merge(
             skip = load_address_list(exclude, to_field=to_field)
         except DataError as exc:
             issues.insert(0, Issue(None, "error", f"exclude list: {exc}"))
+        else:
+            keys = {normalize_address(r.get(to_field) or "") for r in records}
+            if skip and not skip & keys:
+                note = f"exclude list: none of its {len(skip)} address(es) is in the recipient data"
+                issues.append(Issue(None, "warning", note))
+    already: set[str] = set()
+    if log_path is not None:
+        already = sent_addresses(log_path)
+        if already and not resume:
+            issues.insert(
+                0,
+                Issue(
+                    None,
+                    "error",
+                    f"send log {log_path} already records {len(already)} sent address(es); resume to skip them "
+                    "(--resume, or resume=True), or use a new log file for a new mailing",
+                ),
+            )
+        elif resume and not already:
+            issues.append(Issue(None, "warning", f"resume: send log {log_path} records no sent messages yet"))
     if sender and not is_valid_address(sender):
         issues.insert(0, Issue(None, "error", f"invalid sender address {sender!r}"))
     if not sender and any("From" not in t.headers for t in tpls.values()):
@@ -240,7 +277,7 @@ def mail_merge(
         try:
             rendered = tpls[variant].render(record, to_field=to_field)
             for name, value in rendered.headers.items():
-                if value and not all(is_valid_address(v) for v in _split_addresses(value)):
+                if value and not _valid_address_list(value):
                     raise TemplateError(f"invalid address in {name}: {value!r}")
             unsub = fill(list_unsubscribe, record) if list_unsubscribe else None
             files = [Path(p) for p in attachments]
@@ -263,7 +300,8 @@ def mail_merge(
     if errors:
         raise DataError(_describe(errors), errors)
 
-    already = sent_addresses(log_path) if resume and log_path is not None else set()
+    if not resume:
+        already = set()
 
     active: Transport = transport if (transport is not None and not dry_run) else DryRunTransport(output_dir)
     log = SendLog(log_path) if log_path is not None else None
@@ -274,7 +312,7 @@ def mail_merge(
             key = normalize_address(to)
             variant_label = variant if len(tpls) > 1 else None
             if key in skip or key in already:
-                reason = "excluded" if key in skip else "already sent (resume)"
+                reason = "excluded" if key in skip else "already in the send log (resume)"
                 result = Result(to, "skipped", variant_label, detail=reason)
             elif limit is not None and delivered >= limit:
                 result = Result(to, "skipped", variant_label, detail="limit reached")
@@ -309,6 +347,9 @@ def _deliver(transport: Transport, message: EmailMessage, to: str, variant: str 
     message_id = str(message["Message-ID"])
     try:
         refused = transport.send(message)
+    except UncertainSendError as exc:
+        logger.warning("delivery to %s is uncertain: %s", to, exc)
+        return Result(to, "uncertain", variant, message_id, str(exc))
     except PermanentSendError as exc:
         logger.warning("failed to send to %s: %s", to, exc)
         return Result(to, "failed", variant, message_id, str(exc))
@@ -318,9 +359,23 @@ def _deliver(transport: Transport, message: EmailMessage, to: str, variant: str 
     return Result(to, "dry_run" if dry_run else "sent", variant, message_id, detail)
 
 
-def _split_addresses(value: str) -> list[str]:
-    """Split a header like "A <a@x.org>, b@y.org" into single addresses."""
-    return [formataddr(pair) for pair in getaddresses([value])]
+def _valid_address_list(value: str) -> bool:
+    """Whether a header value like "A <a@x.org>, b@y.org" is a clean list of valid addresses.
+
+    The value is parsed the way the message header will be, so a value that
+    passes is delivered to exactly the addresses written.
+    """
+    try:
+        header = policy.default.header_factory("To", value)
+        groups, defects = header.groups, header.defects
+    except Exception:  # noqa: BLE001 - the stdlib parser raises several types on odd input
+        return False
+    if any(not isinstance(d, ObsoleteHeaderDefect) for d in defects):
+        return False
+    if any(g.display_name is not None for g in groups):
+        return False
+    addresses = [a for g in groups for a in g.addresses]
+    return bool(addresses) and all(is_valid_address(str(a)) for a in addresses)
 
 
 def _describe(errors: Sequence[Issue], shown: int = 20) -> str:

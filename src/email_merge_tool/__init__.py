@@ -15,7 +15,15 @@ import logging
 
 __version__ = "0.2.0"
 
-from .data import DataError, Issue, is_valid_address, load_recipients, validate_recipients  # noqa: E402
+from .data import (  # noqa: E402
+    DataError,
+    Issue,
+    is_valid_address,
+    load_address_list,
+    load_recipients,
+    normalize_address,
+    validate_recipients,
+)
 from .experiment import Assignment, assign_variants, write_assignments  # noqa: E402
 from .merge import MergeReport, Result, mail_merge  # noqa: E402
 from .message import build_message  # noqa: E402
@@ -28,6 +36,7 @@ from .transport import (  # noqa: E402
     PermanentSendError,
     SMTPConfig,
     SMTPTransport,
+    UncertainSendError,
 )
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
@@ -46,6 +55,8 @@ __all__ = [
     "load_recipients",
     "validate_recipients",
     "is_valid_address",
+    "load_address_list",
+    "normalize_address",
     "DataError",
     "Issue",
     "assign_variants",
@@ -59,5 +70,6 @@ __all__ = [
     "SMTPTransport",
     "DryRunTransport",
     "PermanentSendError",
+    "UncertainSendError",
     "FatalSendError",
 ]

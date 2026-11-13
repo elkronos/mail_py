@@ -25,9 +25,16 @@ The SMTP password is read from ${PASSWORD_ENV}, or prompted for. It is never
 accepted as a command-line argument, where it would be visible to other users
 and saved in shell history.
 
+--send needs --log FILE. If a run stops part-way (Ctrl-C, a daily limit,
+a dropped connection), run the same command again with --resume added: people
+the log records as sent are skipped. Without --resume, a log that already
+records sent messages is refused, so a repeated command cannot email everyone
+a second time.
+
 examples:
   email-merge -t invite.txt -d people.csv --from "Lab <lab@example.org>"
   email-merge -t invite.txt -d people.csv --from lab@gmail.com --service gmail --send --log sent.jsonl
+  email-merge -t invite.txt -d people.csv --from lab@gmail.com --service gmail --send --log sent.jsonl --resume
   email-merge -t control.txt -t personal.txt -d people.csv --seed 2024 --strata dept \\
       --assignments assignments.csv --from lab@example.org
 """
@@ -76,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--assignments", metavar="FILE", help="write the assignment table to this CSV")
 
     g = p.add_argument_group("sending")
-    g.add_argument("--send", action="store_true", help="actually send (otherwise dry run)")
+    g.add_argument("--send", action="store_true", help="send for real (otherwise dry run); needs --log or --no-log")
     g.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation before sending")
     g.add_argument("--service", choices=sorted(PRESETS), help="provider preset")
     g.add_argument("--host", help="SMTP host (instead of --service)")
@@ -84,7 +91,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--security", choices=["ssl", "starttls", "none"], default="starttls")
     g.add_argument("--username", help="SMTP login (default: the --from address)")
     g.add_argument("--no-auth", action="store_true", help="do not log in (e.g. an internal relay on port 25)")
-    g.add_argument("--log", metavar="FILE", help="JSON Lines send log (audit trail)")
+    g.add_argument("--log", metavar="FILE", help="JSON Lines send log (audit trail); required with --send")
+    g.add_argument("--no-log", action="store_true", help="send without a log (an interrupted run cannot be resumed)")
     g.add_argument("--resume", action="store_true", help="skip recipients already sent to in --log")
     g.add_argument("--exclude", metavar="FILE", help="addresses to skip (.txt one per line, or .csv/.json)")
     g.add_argument("--limit", type=int, help="send at most N messages this run")
@@ -128,6 +136,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.send and not (args.service or args.host):
         parser.error("--send needs --service or --host")
+    if args.log and args.no_log:
+        parser.error("--log and --no-log cannot be used together")
+    if args.send and not args.log and not args.no_log:
+        parser.error("--send needs --log FILE, so an interrupted run can be resumed without emailing anyone twice")
     try:
         if args.html and len(args.html) != len(args.template):
             raise TemplateError("give --html once for each --template (same order)")
@@ -177,7 +189,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             **common,
         )
         print(f"\nDone: {report.summary()}.")
-        return 1 if report.failed else 0
+        if report.uncertain:
+            print(
+                f"{report.uncertain} message(s) may or may not have arrived (the connection dropped after sending). "
+                "They are logged as 'uncertain' and --resume will not send them again.",
+                file=sys.stderr,
+            )
+        return 1 if report.failed or report.uncertain else 0
     except DataError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

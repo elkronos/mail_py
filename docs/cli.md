@@ -29,15 +29,16 @@ Without `--send`, the command validates everything, prints the first message
 | `--weights 2,1` | Allocation ratio between templates (default equal). |
 | `--variant-field COLUMN` | Use a column naming each row's template, instead of `--seed`. |
 | `--assignments FILE` | Write the assignment table (CSV). |
-| `--send` | Actually send. |
+| `--send` | Send for real. Requires `--log FILE` or `--no-log`. |
 | `-y, --yes` | Skip the confirmation prompt. |
 | `--service NAME` | `gmail`, `outlook` or `office365`. |
 | `--host`, `--port`, `--security` | A custom SMTP server. `--security` is `ssl`, `starttls` (default) or `none`. |
 | `--username` | SMTP login (default: the `--from` address). |
 | `--no-auth` | Don't log in (for example, an internal relay). |
-| `--log FILE` | JSON Lines send log. |
-| `--resume` | Skip addresses already logged as `sent`. |
-| `--exclude FILE` | Addresses to skip (`.txt`, one per line, or `.csv`/`.json`). |
+| `--log FILE` | JSON Lines send log. Required with `--send`. If the file already records sent messages, the run is refused unless you add `--resume`. |
+| `--no-log` | Send without a log. An interrupted run then cannot be resumed. |
+| `--resume` | Skip addresses the log records as `sent` or `uncertain`. |
+| `--exclude FILE` | Addresses to skip (`.txt`, one per line, or `.csv`/`.json`). Every entry must be one valid address; see [reminder waves](guide/resume.md#reminder-waves). |
 | `--limit N` | Send at most N messages this run. |
 | `--rate PER_MIN` | Maximum send rate (default 20 per minute; `0` for no limit). |
 | `--output-dir DIR` | Dry run: save every message as a `.eml` file. |
@@ -51,7 +52,7 @@ or an interactive prompt.
 | Code | Meaning |
 | --- | --- |
 | 0 | Success (a dry run, or every message sent) |
-| 1 | Some messages failed, or you declined the confirmation |
+| 1 | Some messages failed or are `uncertain`, or you declined the confirmation |
 | 2 | Validation, template or connection error (nothing was sent by this invocation, or it stopped early; see the log) |
 | 130 | Interrupted with Ctrl-C (re-run with `--resume`) |
 
@@ -66,7 +67,8 @@ email-merge -t invite.txt -d people.csv --from me@gmail.com --service gmail \
     --send --log invite.jsonl --resume --limit 450
 
 # Institutional relay on port 25 without authentication
-email-merge -t invite.txt -d people.csv --from me@uni.edu --host smtp.uni.edu --port 25 --no-auth --send
+email-merge -t invite.txt -d people.csv --from me@uni.edu --host smtp.uni.edu --port 25 --no-auth \
+    --send --log invite.jsonl
 
 # Two-arm experiment stratified by department, 2:1 allocation
 email-merge -t long.txt -t short.txt -d panel.csv --from me@uni.edu \

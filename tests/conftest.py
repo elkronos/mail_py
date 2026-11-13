@@ -11,8 +11,10 @@ class FakeSMTP:
     """Stands in for smtplib.SMTP / SMTP_SSL and records what was sent."""
 
     instances: list["FakeSMTP"] = []
-    # Scripted failures: list of exceptions raised by successive send_message calls.
-    failures: list[Exception] = []
+    # Scripted outcomes of successive send_message calls: None succeeds, an
+    # exception is raised before DATA, and ("after_data", exc) delivers the
+    # message and then raises exc, as when the server's final reply is lost.
+    failures: list = []
     login_error: Exception | None = None
 
     def __init__(self, host, port, timeout=None, context=None):
@@ -34,10 +36,17 @@ class FakeSMTP:
     def send_message(self, msg):
         if FakeSMTP.failures:
             error = FakeSMTP.failures.pop(0)  # None means "this call succeeds"
+            if isinstance(error, tuple):
+                self.data(msg)  # like smtplib: goes through the instance's data()
+                raise error[1]
             if error is not None:
                 raise error
         self.sent.append(msg)
         return {}
+
+    def data(self, msg):
+        self.sent.append(msg)
+        return (250, b"queued")
 
     def quit(self):
         self.closed = True

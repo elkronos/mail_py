@@ -246,3 +246,115 @@ def test_invalid_sender_and_header_addresses(people):
 def test_missing_exclude_file_is_a_validation_error(people, tmp_path):
     with pytest.raises(DataError, match="exclude list: address list not found"):
         mail_merge(TPL, people, sender=SENDER, exclude=tmp_path / "responded.txt")
+
+
+def test_address_with_trailing_text_is_rejected_not_rerouted(people):
+    rows = [*people, dict(people[0], email="ann@example.org extra")]
+    with pytest.raises(DataError, match="row 5: invalid email address 'ann@example.org extra'"):
+        mail_merge(TPL, rows, sender=SENDER)
+
+
+def test_exclusion_matches_display_name_and_case_variants(people):
+    rows = [dict(people[0], email="Dr. Ann Smith <ANN@example.org>"), *people[1:]]
+    report = mail_merge(TPL, rows, sender=SENDER, exclude=["ann@example.org"])
+    assert [r.status for r in report.results] == ["skipped", "dry_run", "dry_run", "dry_run"]
+
+
+def test_exclusion_that_matches_nobody_warns(people):
+    report = mail_merge(TPL, people, sender=SENDER, exclude=["zed@example.org"])
+    assert any("none of its 1 address(es)" in i.message for i in report.issues)
+
+
+def test_reusing_a_log_without_resume_is_refused(people, fake_smtp, tmp_path):
+    log = tmp_path / "log.jsonl"
+    mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=gmail(), log_path=log)
+    with pytest.raises(DataError, match="already records 4 sent address"):
+        mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=gmail(), log_path=log)
+    with pytest.raises(DataError, match="already records"):  # the dry-run preview fails the same way
+        mail_merge(TPL, people, sender=SENDER, log_path=log)
+    assert sum(len(c.sent) for c in fake_smtp.instances) == 4
+
+
+def test_resume_with_an_empty_log_warns(people, tmp_path):
+    report = mail_merge(TPL, people, sender=SENDER, log_path=tmp_path / "typo.jsonl", resume=True)
+    assert any("records no sent messages" in i.message for i in report.issues)
+
+
+def test_disconnect_after_data_is_not_retried(people, fake_smtp, tmp_path):
+    log = tmp_path / "log.jsonl"
+    fake_smtp.failures = [("after_data", smtplib.SMTPServerDisconnected("reply lost"))]
+    report = mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=gmail(), log_path=log)
+    assert [r.status for r in report.results] == ["uncertain", "sent", "sent", "sent"]
+    delivered = [m["To"] for c in fake_smtp.instances for m in c.sent]
+    assert delivered.count("ann@example.org") == 1
+    assert [r["status"] for r in read_log(log)][0] == "uncertain"
+    assert "uncertain: 1" in report.summary()
+
+    again = mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=gmail(), log_path=log, resume=True)
+    assert again.skipped == 4
+    assert [m["To"] for c in fake_smtp.instances for m in c.sent].count("ann@example.org") == 1
+
+
+class _Server:
+    """A minimal SMTP server on a real socket that can drop chosen replies."""
+
+    def __init__(self, drop):
+        import socket
+        import threading
+
+        self.drop = list(drop)  # per message: None, "rcpt" (close before DATA) or "data" (close after the data)
+        self.messages = []
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn, conn.makefile("rb") as reader:
+                conn.sendall(b"220 test\r\n")
+                if not self._session(conn, reader):
+                    continue
+
+    def _session(self, conn, reader):
+        while line := reader.readline():
+            verb = line[:4].upper()
+            if verb in (b"EHLO", b"HELO"):
+                conn.sendall(b"250 test\r\n")
+            elif verb == b"MAIL":
+                conn.sendall(b"250 ok\r\n")
+            elif verb == b"RCPT":
+                if self.drop and self.drop[0] == "rcpt":
+                    self.drop.pop(0)
+                    return False
+                conn.sendall(b"250 ok\r\n")
+            elif verb == b"DATA":
+                conn.sendall(b"354 go\r\n")
+                body = b"".join(iter(reader.readline, b".\r\n"))
+                self.messages.append(body)
+                if self.drop and self.drop.pop(0) == "data":
+                    return False  # the message is queued, but the reply never arrives
+                conn.sendall(b"250 queued\r\n")
+            elif verb == b"QUIT":
+                conn.sendall(b"221 bye\r\n")
+                return True
+            else:
+                conn.sendall(b"250 ok\r\n")
+        return True
+
+
+def test_real_smtplib_retries_before_data_but_not_after(people, tmp_path, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    # Consumed in order: ann's first try is cut at RCPT and her retry succeeds,
+    # bo's reply is lost after his data, cy succeeds.
+    server = _Server(drop=["rcpt", None, "data", None])
+    transport = SMTPTransport(SMTPConfig("127.0.0.1", server.port, "none"))
+    report = mail_merge(TPL, people[:3], sender=SENDER, dry_run=False, transport=transport, log_path=tmp_path / "l")
+    server.sock.close()
+    # ann: dropped at RCPT, retried, delivered once. bo: dropped after the data, not retried.
+    assert [r.status for r in report.results] == ["sent", "uncertain", "sent"]
+    tos = [next(line for line in m.split(b"\r\n") if line.startswith(b"To:")) for m in server.messages]
+    assert tos == [b"To: ann@example.org", b"To: bo@example.org", b"To: cy@example.org"]

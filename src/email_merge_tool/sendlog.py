@@ -2,13 +2,15 @@
 
 The log is both an audit trail (who received which variant, when, and with
 what Message-ID) and the mechanism behind ``resume``: recipients with a
-``"sent"`` entry are skipped on the next run, so re-running after a crash or
-a provider's daily limit never emails anyone twice.
+``"sent"`` or ``"uncertain"`` entry are skipped on the next run, so re-running
+after a crash or a provider's daily limit does not email them again. A run
+refuses to reuse a log that already records sent messages unless it resumes.
 
-Each line is flushed and ``fsync``-ed immediately after the message is
-accepted by the server. The only remaining duplicate window is a crash in the
-instant between the server accepting a message and the log line reaching
-disk.
+Each line is flushed and ``fsync``-ed immediately after the server answers.
+A message is logged ``"uncertain"`` when the connection drops after its data
+was sent, because the server may have accepted it; it is not retried. One
+duplicate window remains: a crash between the server accepting a message and
+the log line reaching disk.
 """
 
 from __future__ import annotations
@@ -62,6 +64,10 @@ def read_log(path: str | Path) -> Iterator[dict[str, Any]]:
                 continue  # partially written last line after a crash
 
 
+#: Log statuses that mean the recipient may already have the message.
+DELIVERED_STATUSES = frozenset({"sent", "uncertain"})
+
+
 def sent_addresses(path: str | Path) -> set[str]:
-    """Normalized addresses that have a ``"sent"`` record in the log."""
-    return {normalize_address(r["to"]) for r in read_log(path) if r.get("status") == "sent" and r.get("to")}
+    """Normalized addresses with a ``"sent"`` or ``"uncertain"`` record in the log."""
+    return {normalize_address(r["to"]) for r in read_log(path) if r.get("status") in DELIVERED_STATUSES and r.get("to")}
