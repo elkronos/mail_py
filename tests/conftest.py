@@ -75,8 +75,9 @@ class FakeSMTP:
 @pytest.fixture(autouse=True)
 def no_hostname_lookup(monkeypatch):
     # smtplib names the local host for EHLO with socket.getfqdn(), a DNS
-    # lookup that takes tens of seconds on some CI runners (macOS).
-    monkeypatch.setattr("socket.getfqdn", lambda name="": "localhost")
+    # lookup that takes tens of seconds on some CI runners (macOS). The name
+    # needs a dot, or smtplib falls back to a second lookup.
+    monkeypatch.setattr("socket.getfqdn", lambda name="": "localhost.localdomain")
 
 
 @pytest.fixture
