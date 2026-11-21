@@ -21,7 +21,7 @@ from .data import (
     validate_recipients,
 )
 from .experiment import Assignment, assign_variants, write_assignments
-from .message import build_message
+from .message import build_message, wire_bytes
 from .sendlog import SendLog, sent_addresses
 from .templates import Template, TemplateError, fill, load_template, placeholders
 from .transport import DryRunTransport, FatalSendError, PermanentSendError, Transport, UncertainSendError
@@ -289,15 +289,9 @@ def mail_merge(
                 one_click_unsubscribe=one_click_unsubscribe,
                 attachments=files,
             )
-            for name, value in message.items():  # what smtplib's generator does; fails here, not mid-run
-                try:
-                    message.policy.fold_binary(name, value)
-                except MessageError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - RecursionError, IndexError and others on odd input
-                    raise MessageError(f"{name}: {str(exc) or type(exc).__name__}") from exc
+            _check_writable(message)
         except MessageError as exc:
-            errors.append(Issue(row, "error", f"a header cannot be written: {exc}"))
+            errors.append(Issue(row, "error", f"the message cannot be written: {exc}"))
             continue
         except (TemplateError, ValueError, OSError) as exc:
             errors.append(Issue(row, "error", str(exc)))
@@ -418,6 +412,20 @@ def _reuse_issue(path: Path, logged: set[str]) -> Issue:
         "(--resume, or resume=True), or use a new log file for a new mailing",
         where="send log",
     )
+
+
+def _check_writable(message: EmailMessage) -> None:
+    """Serialize ``message`` as delivery will, so a header that cannot be written stops the run before any send.
+
+    Raises:
+        MessageError: for any failure, with the standard library's reason.
+    """
+    try:
+        wire_bytes(message)
+    except MessageError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - UnicodeEncodeError, RecursionError and others on odd input
+        raise MessageError(str(exc) or type(exc).__name__) from exc
 
 
 def _deliver(transport: Transport, message: EmailMessage, to: str, variant: str | None, dry_run: bool) -> Result:

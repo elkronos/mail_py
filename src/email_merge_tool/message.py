@@ -2,21 +2,30 @@
 
 from __future__ import annotations
 
+import copy
+import io
 import mimetypes
 import re
 from collections.abc import Sequence
+from email.errors import MessageError
+from email.generator import BytesGenerator
 from email.headerregistry import BaseHeader, HeaderRegistry
 from email.message import EmailMessage
-from email.policy import Policy
-from email.utils import formatdate, make_msgid, parseaddr
+from email.policy import EmailPolicy, Policy
+from email.utils import formatdate, getaddresses, make_msgid, parseaddr
 from pathlib import Path
 
 from .templates import RenderedMessage
 
-__all__ = ["build_message"]
+__all__ = ["build_message", "needs_smtputf8", "wire_bytes"]
 
 # RFC 5322 section 2.1.1: a header line, name included, may not exceed 998 characters.
 _MAX_LINE = 998
+
+# A line break inside a folded header that is not followed by folding
+# whitespace, which would end the header or start a new one. Python 3.13
+# refuses to write these; older versions write them.
+_NEWLINE_WITHOUT_FWSP = re.compile(rb"\r\n[^ \t]|\r[^ \n\t]|\n[^ \t]")
 
 # One RFC 2369 URI in angle brackets: printable ASCII other than < and >.
 _UNSUBSCRIBE_URI = re.compile(r"\s*(<[!-;=?-~]+>)\s*(?:,|$)")
@@ -149,3 +158,49 @@ def build_message(
         maintype, subtype = ctype.split("/", 1)
         msg.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name)
     return msg
+
+
+def needs_smtputf8(message: EmailMessage) -> bool:
+    """Whether an envelope address of ``message`` has non-ASCII characters.
+
+    The envelope addresses are the ones smtplib takes from the headers:
+    ``Sender`` (or ``From``), ``To``, ``Cc`` and ``Bcc``. Such a message can
+    only be sent to a server that offers SMTPUTF8 (RFC 6531), and its headers
+    are written as UTF-8 (RFC 6532) instead of RFC 2047 encoded words.
+    """
+    origin = "Sender" if "Sender" in message else "From"
+    fields = [str(message[name]) for name in (origin, "To", "Cc", "Bcc") if message[name] is not None]
+    return not all(address.isascii() for _, address in getaddresses(fields))
+
+
+def wire_bytes(message: EmailMessage, *, keep_bcc: bool = False) -> bytes:
+    """Serialize ``message`` as it is sent over SMTP.
+
+    The result has CRLF line endings and no ``Bcc`` header (unless
+    ``keep_bcc``), and body lines starting with "From " are left unchanged.
+    Headers are UTF-8 when :func:`needs_smtputf8` is true, as smtplib writes
+    them, and ASCII otherwise.
+
+    Raises:
+        email.errors.MessageError: a header folds into a line that does not
+            start with whitespace, which would cut the header block short or
+            add a header. Python 3.13 and later refuse to write these; this
+            check applies on every version.
+        Exception: anything else the standard library raises for a header it
+            cannot write, such as ``UnicodeEncodeError``.
+    """
+    flat = copy.copy(message)  # deleting a header gives the copy its own header list
+    if not keep_bcc:
+        del flat["Bcc"]
+        del flat["Resent-Bcc"]
+    policy = message.policy.clone(linesep="\r\n")
+    if isinstance(policy, EmailPolicy) and needs_smtputf8(message):
+        policy = policy.clone(utf8=True)
+    for part in flat.walk():
+        for name, value in part.raw_items():
+            folded = policy.fold_binary(name, value).removesuffix(b"\r\n")
+            if _NEWLINE_WITHOUT_FWSP.search(folded):
+                raise MessageError(f"{name}: the header folds into a line that does not start with a space: {folded!r}")
+    buffer = io.BytesIO()
+    BytesGenerator(buffer, mangle_from_=False, policy=policy).flatten(flat)
+    return buffer.getvalue()

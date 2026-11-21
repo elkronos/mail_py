@@ -16,6 +16,8 @@ from email.utils import getaddresses
 from pathlib import Path
 from typing import Any, Protocol
 
+from .message import wire_bytes
+
 __all__ = [
     "PRESETS",
     "SMTPConfig",
@@ -382,7 +384,7 @@ class DryRunTransport:
         if self.output_dir is not None:
             safe = "".join(c if c.isalnum() or c in "._@-" else "_" for c in str(message["To"]))
             path = self.output_dir / f"{len(self.messages):05d}_{safe}.eml"
-            path.write_bytes(message.as_bytes())
+            path.write_bytes(wire_bytes(message, keep_bcc=True))
         return {}
 
     def close(self) -> None:

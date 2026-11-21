@@ -9,8 +9,9 @@
 - A send that reuses a log already recording sent messages is refused unless it resumes, so repeating a command with the same log cannot email everyone again. Resuming from a log that does not exist, or whose addresses are all missing from the data, is an error. A run locks its log while sending, so two runs cannot use one log at once. A torn last line in the log no longer swallows the next record. Dry runs no longer create the log file.
 - A connection lost, or a reply cut short or garbled, after the whole message was written is no longer retried, since the server may already have the message. The row is logged as `uncertain` and resume skips it; Ctrl-C while waiting for that reply logs it the same way. Failures before the message is fully written are still retried. The reply to the message content is awaited for up to 10 minutes (RFC 5321).
 - Body lines that start with `From ` reach recipients unchanged. smtplib sent them as `>From `, which the `.eml` preview did not show. The tool now flattens each message itself, removing `Bcc` and choosing the envelope as before. Non-ASCII text is declared with `BODY=8BITMIME`, or encoded as base64 for a server that does not offer 8BITMIME.
-
 - Long `List-Unsubscribe` values, such as links with a token, are written as given instead of RFC 2047-encoded, which no mail client could use. The header folds only between URIs. A value that is not ASCII URIs in angle brackets fails validation for its row.
+- Validation writes out every message exactly as it will be sent. A header that Python 3.10 to 3.12 fold into a line break without the following space, which ended the header block early on 3.10 and stopped a send partway on 3.11 and 3.12, now fails validation for its row.
+- Dry-run `.eml` files are the bytes that go over SMTP, with CRLF line endings, and are UTF-8 when an address needs SMTPUTF8. Such an address used to stop the dry run with `UnicodeEncodeError`.
 
 ### Changed
 - `email-merge --send` requires `--log FILE`, or `--no-log` to send without one.

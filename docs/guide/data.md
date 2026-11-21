@@ -27,6 +27,7 @@ Before any message is built or sent, every row is checked:
 | Each address is present and syntactically valid | error |
 | No address appears twice (case-insensitive, display names ignored) | error, unless `allow_duplicates=True` |
 | Attachment files exist | error |
+| Every message can be written out exactly as it will be sent | error |
 | Rows with an unquoted comma have more cells than the header | error when loading |
 | An unbalanced double quote, a line break inside a column name, or a cell with a line that looks like another recipient's row (commas without spaces after them, and an address as one field) | error when loading |
 | A placeholder's value is empty | warning |
