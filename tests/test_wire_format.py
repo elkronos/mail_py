@@ -51,7 +51,7 @@ def test_the_body_arrives_as_built(lines, eight_bit):
     ((sender, recipients, wire, options),) = connection.calls
     assert (sender, recipients) == ("team@example.org", ["ann@example.org", "archive@example.org"])
     assert b"\n" not in wire.replace(b"\r\n", b"")  # CRLF line endings only
-    assert b"Bcc" not in wire
+    assert b"Bcc" not in wire.partition(b"\r\n\r\n")[0]  # the body may say "Bcc"
     if not wire.isascii():
         assert eight_bit and options == ["BODY=8BITMIME"]
     received = message_from_bytes(wire, policy=policy.default)
