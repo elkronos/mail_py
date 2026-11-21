@@ -4,8 +4,10 @@ import copy
 import pickle
 import re
 import smtplib
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes, policy
 from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 
 import pytest
 
@@ -336,3 +338,30 @@ def test_message_id_is_random_and_uses_the_from_domain(monkeypatch):
     assert re.fullmatch(r"<[0-9a-f]{32}@xn--mnchen-3ya\.de>", message_id("münchen.de"))
     with pytest.raises(ValueError, match="IDNA"):
         message_id("x" * 64 + ".de")
+
+
+def test_date_is_the_send_time_in_utc(people, monkeypatch):
+    clock = [datetime(2026, 11, 13, 4, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr("email_merge_tool.message._now", lambda: clock[0])
+    monkeypatch.setattr("time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + timedelta(seconds=seconds)))
+
+    class Recorder:
+        def __init__(self):
+            self.dates = []
+
+        def open(self):
+            pass
+
+        def close(self):
+            pass
+
+        def send(self, message):
+            self.dates.append((clock[0], str(message["Date"])))
+            return {}
+
+    transport = Recorder()
+    mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=transport, min_interval=3600)
+    # The fourth message leaves three hours after the messages were built.
+    assert [sent - parsedate_to_datetime(date) for sent, date in transport.dates] == [timedelta(0)] * 4
+    assert all(date.endswith(" +0000") for _, date in transport.dates)
+    assert transport.dates[3][0] - transport.dates[0][0] == timedelta(hours=3)

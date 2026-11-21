@@ -21,7 +21,7 @@ from .data import (
     validate_recipients,
 )
 from .experiment import Assignment, assign_variants, write_assignments
-from .message import attachment_name, build_message, wire_bytes
+from .message import attachment_name, build_message, stamp_date, wire_bytes
 from .sendlog import SendLog, sent_addresses
 from .templates import Template, TemplateError, fill, load_template, placeholders
 from .transport import (
@@ -503,6 +503,7 @@ def _deliver(
 ) -> tuple[Result, bool]:
     """Send one message. Also says whether a failure counts toward ``max_consecutive_failures``."""
     message_id = str(message["Message-ID"])
+    stamp_date(message)  # the send time, not the build time, which can be hours earlier
     try:
         refused = transport.send(message)
     except UncertainSendError as exc:

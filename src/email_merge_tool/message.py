@@ -13,13 +13,14 @@ import secrets
 import unicodedata
 import urllib.parse
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from email.errors import MessageError
 from email.generator import BytesGenerator
 from email.headerregistry import BaseHeader, HeaderRegistry
 from email.message import EmailMessage, Message
 from email.policy import EmailPolicy, Policy
 from email.policy import default as _default_policy
-from email.utils import formatdate, getaddresses
+from email.utils import format_datetime, getaddresses
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ __all__ = [
     "build_message",
     "message_id",
     "needs_smtputf8",
+    "stamp_date",
     "wire_bytes",
 ]
 
@@ -338,7 +340,7 @@ def build_message(
         if rendered.headers.get(name):
             msg[name] = rendered.headers[name]
     msg["Subject"] = rendered.subject if rendered.subject.isascii() else _encoded_subject(rendered.subject)
-    msg["Date"] = formatdate(localtime=True)
+    msg["Date"] = format_datetime(_now())
     msg["Message-ID"] = message_id(mailbox.domain)
     if list_unsubscribe:
         uris = _unsubscribe_uris(list_unsubscribe)
@@ -357,6 +359,25 @@ def build_message(
     for item in attachments:
         _attach(msg, Path(item).read_bytes(), attachment_name(item))
     return msg
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def stamp_date(message: Message) -> None:
+    """Set the ``Date`` header to the current time in UTC (``+0000``).
+
+    ``mail_merge`` calls this just before handing each message to the
+    transport, so the date is the send time even late in a long, rate-limited
+    run; SpamAssassin scores a ``Date`` three or more hours old as suspicious.
+    The header keeps its place among the others.
+    """
+    value = format_datetime(_now())
+    if "Date" in message:
+        message.replace_header("Date", value)
+    else:
+        message["Date"] = value
 
 
 def message_id(domain: str) -> str:
