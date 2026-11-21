@@ -31,6 +31,8 @@ from .transport import (
     Transport,
     UncertainSendError,
     _describe_refused,
+    _mailbox_problem,
+    _text,
 )
 
 __all__ = ["mail_merge", "MergeReport", "Result"]
@@ -140,6 +142,7 @@ def mail_merge(
     attachment_field: str | None = None,
     output_dir: str | Path | None = None,
     progress: Callable[[Result], None] | None = None,
+    max_consecutive_failures: int = 5,
 ) -> MergeReport:
     """Validate recipients against the template(s) and send one message each.
 
@@ -176,7 +179,8 @@ def mail_merge(
         resume: Skip recipients the log already records as ``sent`` (or
             ``uncertain``).
         limit: Send at most this many messages this run (e.g. a daily quota).
-        min_interval: Seconds to wait between messages (rate limiting).
+        min_interval: Seconds to wait between send attempts, failed ones
+            included (rate limiting).
         list_unsubscribe: ``List-Unsubscribe`` header value; may contain
             placeholders, e.g. ``"<https://example.org/unsub?id={id}>"``.
         one_click_unsubscribe: Add the RFC 8058 one-click header too.
@@ -187,6 +191,13 @@ def mail_merge(
             placeholders. Relative paths are resolved from the working directory.
         output_dir: In a dry run, also write each message as a ``.eml`` file here.
         progress: Called with each :class:`Result` as it is produced.
+        max_consecutive_failures: Stop the run with :class:`FatalSendError`
+            after this many failed messages in a row (default 5; ``0`` never
+            stops). Failures that name a bad address or mailbox (enhanced
+            status codes X.1.x and X.2.x, such as 5.1.1 for an unknown user)
+            do not count, and a sent message starts the count again. Many
+            failures in a row usually mean a problem with the account or
+            the server, which every remaining message would meet too.
 
     Returns:
         A :class:`MergeReport`.
@@ -195,8 +206,11 @@ def mail_merge(
         DataError: validation found errors (see ``exc.issues``), or the send
             log already records sent messages and ``resume`` is false;
             nothing was sent.
-        FatalSendError: the connection or login failed; see the log for what
-            was already sent, and re-run with ``resume=True``.
+        FatalSendError: the connection or login failed, the server refused
+            the account (:class:`AccountRefusedError`, e.g. a daily quota), or
+            ``max_consecutive_failures`` messages failed in a row. The message
+            being sent when that happened is logged as ``failed``. See the log
+            for what was already sent, and re-run with ``resume=True``.
     """
     tpls = _as_templates(templates)
     records = load_recipients(recipients)
@@ -210,6 +224,8 @@ def mail_merge(
         raise ValueError("several templates given: pass seed= for random assignment, or variant_field=")
     if limit is not None and limit < 0:
         raise ValueError("limit must be >= 0")
+    if max_consecutive_failures < 0:
+        raise ValueError("max_consecutive_failures must be >= 0 (0 turns the check off)")
 
     fields: set[str] = set().union(*(t.fields for t in tpls.values()))
     if list_unsubscribe:
@@ -329,22 +345,28 @@ def mail_merge(
             already = current
 
     active: Transport = transport if (transport is not None and not dry_run) else DryRunTransport(output_dir)
-    delivered = 0
+    delivered = attempted = 0
+    consecutive = 0  # failed messages in a row, not counting bad addresses
     try:
         active.open()
         for to, variant, message in built:
             key = normalize_address(to)
             variant_label = variant if len(tpls) > 1 else None
+            stop: FatalSendError | None = None
             if key in skip or key in already:
                 reason = "excluded" if key in skip else "already in the send log"
                 result = Result(to, "skipped", variant_label, detail=reason)
             elif limit is not None and delivered >= limit:
                 result = Result(to, "skipped", variant_label, detail="limit reached")
             else:
-                if delivered and min_interval and not dry_run:
+                if attempted and min_interval and not dry_run:
                     time.sleep(min_interval)
+                attempted += 1
+                counts = False
                 try:
-                    result = _deliver(active, message, to, variant_label, dry_run)
+                    result, counts = _deliver(active, message, to, variant_label, dry_run)
+                except FatalSendError as exc:  # e.g. a quota or a failed reconnect: this one was not sent
+                    result, stop = Result(to, "failed", variant_label, str(message["Message-ID"]), str(exc)), exc
                 except BaseException:
                     if log is not None and getattr(active, "unconfirmed", False):  # e.g. Ctrl-C awaiting the reply
                         log.write(
@@ -360,6 +382,17 @@ def mail_merge(
                     delivered += 1
                 if dry_run:
                     report.messages.append(message)
+                if result.status == "sent":
+                    consecutive = 0
+                elif counts:
+                    consecutive += 1
+                    if max_consecutive_failures and consecutive >= max_consecutive_failures:
+                        stop = FatalSendError(
+                            f"stopped after {consecutive} failed messages in a row; the last: {result.detail}. "
+                            "Check the account and the server, then resume to continue (failed messages are "
+                            "tried again). max_consecutive_failures (--max-failures) sets the number; 0 turns "
+                            "this check off."
+                        )
             report.results.append(result)
             if log is not None:
                 log.write(
@@ -372,6 +405,8 @@ def mail_merge(
                 )
             if progress is not None:
                 progress(result)
+            if stop is not None:
+                raise stop
     finally:
         active.close()
         if log is not None:
@@ -435,27 +470,30 @@ def _check_writable(message: EmailMessage) -> None:
         raise MessageError(str(exc) or type(exc).__name__) from exc
 
 
-def _deliver(transport: Transport, message: EmailMessage, to: str, variant: str | None, dry_run: bool) -> Result:
+def _deliver(
+    transport: Transport, message: EmailMessage, to: str, variant: str | None, dry_run: bool
+) -> tuple[Result, bool]:
+    """Send one message. Also says whether a failure counts toward ``max_consecutive_failures``."""
     message_id = str(message["Message-ID"])
     try:
         refused = transport.send(message)
     except UncertainSendError as exc:
         logger.warning("delivery to %s is uncertain: %s", to, exc)
-        return Result(to, "uncertain", variant, message_id, str(exc))
+        return Result(to, "uncertain", variant, message_id, str(exc)), False
     except PermanentSendError as exc:
         logger.warning("failed to send to %s: %s", to, exc)
-        return Result(to, "failed", variant, message_id, str(exc))
-    except FatalSendError:
-        raise
+        return Result(to, "failed", variant, message_id, str(exc)), not _mailbox_problem(getattr(exc, "smtp_error", ""))
     refused = refused if isinstance(refused, Mapping) else {}
     key = normalize_address(to)
     mine = {address: reply for address, reply in refused.items() if normalize_address(address) == key}
     if mine:  # a Cc or Bcc took it, but the person this row is for did not
         detail = f"recipient refused: {_describe_refused(mine)}; the other recipients were sent the message"
         logger.warning("failed to send to %s: %s", to, detail)
-        return Result(to, "failed", variant, message_id, detail)
+        reply = next(iter(mine.values()))
+        text = _text(reply[1]) if isinstance(reply, tuple) and len(reply) == 2 else ""
+        return Result(to, "failed", variant, message_id, detail), not _mailbox_problem(text)
     detail = f"some recipients refused: {_describe_refused(refused)}" if refused else ""
-    return Result(to, "dry_run" if dry_run else "sent", variant, message_id, detail)
+    return Result(to, "dry_run" if dry_run else "sent", variant, message_id, detail), False
 
 
 def _describe(errors: Sequence[Issue], shown: int = 20) -> str:

@@ -76,6 +76,21 @@ deliverability and higher limits. All of them offer SMTP, so use `--host`,
   the run continues.
 - **Fatal** failures (can't connect, login rejected) stop the run with a clear
   message. Use `--resume` afterwards.
+- **Account-level** refusals stop the run at once, because every remaining
+  message would meet them too: a daily quota (Gmail's `550 5.4.5`,
+  Microsoft's `SubmissionQuotaExceeded`), a `4.7.x` or `5.7.x` reply about a
+  rate or limit, a login the server asks for while sending (530, 535), or a
+  sender address it refuses. In Python this raises `AccountRefusedError`.
+  The message that met the refusal is logged as `failed`, so `--resume`
+  sends it once the cause is fixed.
+- After **5 failed messages in a row** the run stops as well, since that
+  usually means a problem with the account or server rather than five bad
+  addresses. Refusals that name an unknown address or a full or disabled
+  mailbox (enhanced status codes `5.1.x` and `5.2.x`) don't count, and a sent
+  message starts the count again. Change the number with `--max-failures N`
+  (`max_consecutive_failures=` in Python); `0` turns the check off.
+- `--rate` spaces failed attempts too, so a run that fails from the first
+  message doesn't send a burst.
 - If the server accepts a message for the main recipient but refuses a `Cc`
   or `Bcc`, the message counts as `sent`, with the refusal noted in `detail`.
 - If the server refuses the main (`To`) recipient, the row is `failed`, even

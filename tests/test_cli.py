@@ -1,3 +1,5 @@
+import smtplib
+
 import pytest
 
 from email_merge_tool.cli import main
@@ -160,3 +162,17 @@ def test_resume_needs_a_log_and_the_preview_shows_it(files, fake_smtp, capsys):
     assert f"Send log: {log.resolve()} (new file)" in capsys.readouterr().out
     assert main(_send_args(files, "--log", str(log), "--resume")) == 0
     assert "(2 address(es) recorded as sent or uncertain)" in capsys.readouterr().out
+
+
+def test_failures_in_a_row_stop_the_run_with_resume_advice(files, fake_smtp, capsys):
+    fake_smtp.failures = [smtplib.SMTPDataError(554, b"5.7.1 rejected")] * 2
+    log = str(files / "sent.jsonl")
+    assert main(_send_args(files, "--log", log, "--max-failures", "2")) == 2
+    err = capsys.readouterr().err
+    assert "stopped after 2 failed messages in a row" in err
+    assert "Re-run with --resume (and the same --log) to continue." in err
+
+    fake_smtp.failures = [smtplib.SMTPDataError(554, b"5.7.1 rejected")] * 2
+    assert main(_send_args(files, "--log", log, "--resume", "--max-failures", "0")) == 1  # failed, not stopped
+    with pytest.raises(SystemExit):
+        main(_send_args(files, "--log", log, "--max-failures", "-1"))

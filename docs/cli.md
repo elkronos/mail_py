@@ -40,6 +40,7 @@ Without `--send`, the command validates everything, prints the first message
 | `--resume` | Skip addresses the log records as `sent` or `uncertain`. Needs `--log`; the log must exist and belong to this mailing. |
 | `--exclude FILE` | Addresses to skip (`.txt`, one per line, or `.csv`/`.json`). Every entry must be one valid address; see [reminder waves](guide/resume.md#reminder-waves). |
 | `--limit N` | Send at most N messages this run. |
+| `--max-failures N` | Stop after N failed messages in a row (default 5; `0` never stops). Unknown addresses and full mailboxes don't count. |
 | `--rate PER_MIN` | Maximum send rate (default 20 per minute; `0` for no limit). |
 | `--output-dir DIR` | Dry run: save every message as a `.eml` file. |
 | `--preview N` | Dry run: print the first N messages (default 1). |

@@ -57,6 +57,11 @@ email-merge ... --send --log big.jsonl --limit 450 --resume   # each later day
 This sends at most 450 messages a run, and the rest are logged as `skipped`
 (`limit reached`). Messages logged `uncertain` count toward the limit.
 
+If the provider's own daily limit runs out first, its refusal (such as
+Gmail's `550 5.4.5 Daily user sending limit exceeded`) stops the run at once.
+The message that met it is logged as `failed`, and the next day's `--resume`
+sends it along with the rest.
+
 ## Reminder waves
 
 Multiple contacts reliably increase survey response (Dillman et al., 2014).

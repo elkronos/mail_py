@@ -92,7 +92,8 @@ A permanent failure for one recipient (such as an unknown mailbox) doesn't
 stop the run. Temporary failures (4xx replies, dropped connections) are retried
 with backoff, up to the point where the message has been sent; a connection
 lost after that is logged as `uncertain` rather than risking a second copy. A
-failed login stops the run immediately, with advice.
+failed login stops the run immediately, with advice, and so does a reply
+saying the account has reached its sending limit.
 
 ## 5. If something interrupts the run
 

@@ -538,3 +538,23 @@ def test_a_transport_that_refuses_the_to_address_fails_the_row(people, tmp_path)
         ),
     ]
     assert sent_addresses(log) == {"ann@example.org"}
+
+
+def test_max_consecutive_failures_must_not_be_negative(people):
+    with pytest.raises(ValueError, match="max_consecutive_failures"):
+        mail_merge(TPL, people, sender=SENDER, max_consecutive_failures=-1)
+
+
+def test_failures_in_a_row_stop_with_the_fake(people, fake_smtp, tmp_path):
+    fake_smtp.failures = [smtplib.SMTPDataError(554, b"5.7.1 rejected")] * 4
+    with pytest.raises(FatalSendError, match="stopped after 2 failed messages in a row"):
+        mail_merge(
+            TPL,
+            people,
+            sender=SENDER,
+            dry_run=False,
+            transport=gmail(),
+            log_path=tmp_path / "l",
+            max_consecutive_failures=2,
+        )
+    assert [r["status"] for r in read_log(tmp_path / "l")] == ["failed", "failed"]

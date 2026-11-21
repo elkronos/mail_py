@@ -31,6 +31,7 @@ from .sendlog import read_log, sent_addresses  # noqa: E402
 from .templates import RenderedMessage, Template, TemplateError, fill, html_to_text, load_template  # noqa: E402
 from .transport import (  # noqa: E402
     PRESETS,
+    AccountRefusedError,
     DryRunTransport,
     FatalSendError,
     PermanentSendError,
@@ -72,4 +73,5 @@ __all__ = [
     "PermanentSendError",
     "UncertainSendError",
     "FatalSendError",
+    "AccountRefusedError",
 ]

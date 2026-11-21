@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import smtplib
 import ssl
 import time
@@ -25,6 +26,7 @@ __all__ = [
     "PermanentSendError",
     "UncertainSendError",
     "FatalSendError",
+    "AccountRefusedError",
 ]
 
 logger = logging.getLogger(__name__)
@@ -41,7 +43,17 @@ PRESETS: dict[str, tuple[str, int, str]] = {
 
 
 class PermanentSendError(Exception):
-    """This one message cannot be delivered (e.g. 5xx: recipient rejected)."""
+    """This one message cannot be delivered (e.g. 5xx: recipient rejected).
+
+    Attributes:
+        smtp_code: The server's reply code, when a reply caused the error.
+        smtp_error: The text of that reply.
+    """
+
+    def __init__(self, *args: object, smtp_code: int | None = None, smtp_error: str = "") -> None:
+        super().__init__(*args)
+        self.smtp_code = smtp_code
+        self.smtp_error = smtp_error
 
 
 class UncertainSendError(PermanentSendError):
@@ -54,6 +66,27 @@ class UncertainSendError(PermanentSendError):
 
 class FatalSendError(Exception):
     """The run cannot continue (e.g. authentication failed)."""
+
+
+class AccountRefusedError(FatalSendError):
+    """The server refuses mail from this account, not just this one message.
+
+    Raised for a sending quota or rate limit (enhanced status 5.4.5, a 4.7.x
+    or 5.7.x reply that mentions a quota, rate or limit, Microsoft's
+    SubmissionQuotaExceeded), a login the server asks for while sending (530,
+    535), or a sender address it refuses (5xx to MAIL FROM, except 552 for
+    size). Sending more would fail the same way. The message that met the
+    reply was not sent.
+
+    Attributes:
+        smtp_code: The server's reply code.
+        smtp_error: The text of that reply.
+    """
+
+    def __init__(self, *args: object, smtp_code: int | None = None, smtp_error: str = "") -> None:
+        super().__init__(*args)
+        self.smtp_code = smtp_code
+        self.smtp_error = smtp_error
 
 
 @dataclass
@@ -244,6 +277,70 @@ def _temporary(reply: tuple[int, bytes]) -> bool:
     return 400 <= reply[0] < 500
 
 
+_ENHANCED_STATUS = re.compile(r"\s*([245])\.(\d{1,3})\.(\d{1,3})(?!\d)")
+_LIMIT_WORDS = re.compile(r"quota|\brate\b|ratelimit|\blimit|exceed|too many", re.IGNORECASE)
+
+
+def _account_refusal(code: int, text: str) -> str | None:
+    """Why a 4xx or 5xx reply refuses the account rather than one message, or None."""
+    if not 400 <= code < 600:
+        return None
+    quota = "The sending quota is used up; continue after it resets."
+    if code in (530, 535):
+        return "It asked for a login while sending; check the username and password."
+    if "submissionquotaexceeded" in text.lower():  # Microsoft 365
+        return quota
+    status = _ENHANCED_STATUS.match(text)
+    if status is None:
+        return None
+    if status.groups() == ("5", "4", "5"):  # Gmail: "Daily user sending limit exceeded"
+        return quota
+    if status.group(2) == "7" and _LIMIT_WORDS.search(text):
+        return "It limits how much this account may send; continue later, or send more slowly."
+    return None
+
+
+def _mailbox_problem(text: str) -> bool:
+    """Whether a reply's enhanced status names the recipient's address or mailbox (X.1.x, X.2.x).
+
+    X.1.7 and X.1.8 are about the sender's address, so they do not count.
+    """
+    status = _ENHANCED_STATUS.match(text)
+    if status is None:
+        return False
+    return status.group(2) == "2" or (status.group(2) == "1" and status.group(3) not in ("7", "8"))
+
+
+def _reply(error: BaseException, main: set[str]) -> tuple[int | None, str]:
+    """The code and text of the reply behind an error: a main recipient's, if several."""
+    if isinstance(error, smtplib.SMTPRecipientsRefused) and error.recipients:
+        replies = error.recipients
+        code, text = next((replies[a] for a in replies if a in main), next(iter(replies.values())))
+        return code, _text(text)
+    if isinstance(error, smtplib.SMTPResponseException):
+        return error.smtp_code, _text(error.smtp_error)
+    return None, ""
+
+
+def _refused_account(error: smtplib.SMTPException, sender: str) -> AccountRefusedError | None:
+    """An :class:`AccountRefusedError` if a reply in ``error`` refuses the account."""
+    if isinstance(error, smtplib.SMTPRecipientsRefused):
+        replies = [(code, _text(text)) for code, text in error.recipients.values()]
+    elif isinstance(error, smtplib.SMTPResponseException):
+        replies = [(error.smtp_code, _text(error.smtp_error))]
+    else:
+        return None
+    for code, text in replies:
+        why = _account_refusal(code, text)
+        if why is None and isinstance(error, smtplib.SMTPSenderRefused) and 500 <= code < 600 and code != 552:
+            why = f"It refuses the sender address {sender}; check the From address."
+        if why is not None:
+            return AccountRefusedError(
+                f"the server refused mail from this account ({code} {text}). {why}", smtp_code=code, smtp_error=text
+            )
+    return None
+
+
 class SMTPTransport:
     """Deliver over SMTP with TLS, automatic reconnection, and retries.
 
@@ -325,12 +422,17 @@ class SMTPTransport:
                 failures persisted through ``max_retries`` retries.
             UncertainSendError: the connection failed after the message data
                 was sent; the message may have been delivered.
+            AccountRefusedError: the reply refuses the account (a quota, a
+                rate limit, a login or the sender address), so the run
+                should stop.
+            FatalSendError: reconnecting failed.
         """
         attempt = 0
         self.unconfirmed = False
         sender, pending, main = _envelope(message)
         refused: dict[str, tuple[int, bytes]] = {}  # for good, while others were sent the message
         delivered = False  # the server has taken the message for at least one recipient
+        error: Exception
         while True:
             phase: _DataPhase | None = None
             try:
@@ -342,30 +444,31 @@ class SMTPTransport:
                 phase = _DataPhase(smtp, self.data_timeout)
                 with phase:
                     result = smtp.sendmail(sender, pending, payload, options)
-                delivered = True
-                retry = {address: reply for address, reply in result.items() if _temporary(reply)}
-                if not retry.keys() & main:
-                    refused.update(result)
-                    return refused
-                refused.update({address: reply for address, reply in result.items() if address not in retry})
-                pending = list(retry)  # the others have it now
-                error: Exception = smtplib.SMTPRecipientsRefused(retry)
             except smtplib.SMTPRecipientsRefused as exc:  # nobody was sent the message this time
                 if any(code == 421 for code, _ in exc.recipients.values()):
                     self.close()  # smtplib has already dropped the connection
+                if account := _refused_account(exc, sender):
+                    raise account from exc
                 permanent = {address: reply for address, reply in exc.recipients.items() if not _temporary(reply)}
                 if permanent.keys() & main or len(permanent) == len(exc.recipients):
                     if delivered:  # a retry for the main recipient, after the others were sent it
                         refused.update(exc.recipients)
                         return refused
-                    raise PermanentSendError(_reason(exc)) from exc
+                    code, text = _reply(exc, main)
+                    raise PermanentSendError(_reason(exc), smtp_code=code, smtp_error=text) from exc
                 refused.update(permanent)
                 pending = [address for address in pending if address not in permanent]
                 error = exc
             except smtplib.SMTPResponseException as exc:
+                if exc.smtp_code == 421:
+                    self.close()  # the server is closing the connection
+                if account := _refused_account(exc, sender):
+                    raise account from exc
                 if 500 <= exc.smtp_code < 600:
-                    raise PermanentSendError(_reason(exc)) from exc
-                self.close()  # e.g. 421: the server is closing the connection
+                    raise PermanentSendError(
+                        _reason(exc), smtp_code=exc.smtp_code, smtp_error=_text(exc.smtp_error)
+                    ) from exc
+                self.close()
                 if phase is not None and phase.sent and not 400 <= exc.smtp_code < 500:
                     # Only a 4xx reply says the server did not take the message. A
                     # reply cut short, garbled or otherwise unexpected says nothing.
@@ -395,11 +498,24 @@ class SMTPTransport:
                         pass
                     self._smtp = None
                 raise
+            else:
+                delivered = True
+                missed = {address: reply for address, reply in result.items() if address in main}
+                if missed and (account := _refused_account(smtplib.SMTPRecipientsRefused(missed), sender)):
+                    raise account  # the main recipient did not get it; a Cc or Bcc did
+                retry = {address: reply for address, reply in result.items() if _temporary(reply)}
+                if not retry.keys() & main:
+                    refused.update(result)
+                    return refused
+                refused.update({address: reply for address, reply in result.items() if address not in retry})
+                pending = list(retry)  # the others have it now
+                error = smtplib.SMTPRecipientsRefused(retry)
             attempt += 1
             if attempt > self.max_retries:
                 reason = f"gave up after {self.max_retries} retries: {_reason(error)}"
                 others = "; the other recipients were sent the message" if delivered else ""
-                raise PermanentSendError(reason + others) from error
+                code, text = _reply(error, main)
+                raise PermanentSendError(reason + others, smtp_code=code, smtp_error=text) from error
             delay = self.backoff**attempt
             logger.warning("temporary failure (%s); retrying in %.0fs", _reason(error), delay)
             time.sleep(delay)

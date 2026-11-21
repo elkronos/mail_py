@@ -62,6 +62,8 @@ Everything below can be imported from `email_merge_tool`.
 
 ::: email_merge_tool.FatalSendError
 
+::: email_merge_tool.AccountRefusedError
+
 ## Send log
 
 ::: email_merge_tool.read_log

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+- A run stops at once when the server refuses the account rather than one message: a sending quota (Gmail's `5.4.5`, Microsoft's `SubmissionQuotaExceeded`), a `4.7.x` or `5.7.x` reply about a rate or limit, a login asked for while sending (530, 535), or a refused sender address. It raises the new `AccountRefusedError` (a `FatalSendError`), and the message that met the refusal is logged as `failed` so resume sends it. Before, the run tried every remaining recipient and logged each as failed.
+- `mail_merge(max_consecutive_failures=5)` and `email-merge --max-failures N` stop a run after N failed messages in a row; refusals of unknown addresses or full mailboxes (`5.1.x`, `5.2.x`) do not count, and `0` turns the check off. After a stop mid-run, the CLI says to re-run with `--resume`.
+- `PermanentSendError` and `AccountRefusedError` carry the server's reply as `smtp_code` and `smtp_error`.
+
 ### Fixed
 - A CSV with an unbalanced double quote no longer merges the rows below it into one cell, which dropped those recipients and mailed their data to one person. Quoting is now strict, and a cell that has swallowed other rows is an error that names the line.
 - Exclusion lists are validated entry by entry. A line such as `ann@example.org, responded`, a list of file names, records, or a DataFrame used to exclude nobody without any warning; files and records now work, and an entry that is not one valid address stops the run with its line number. A warning is shown when no excluded address is in the recipient data.
@@ -24,6 +29,7 @@
 - `Issue` has an optional `where` label. The CLI preview shows the send log's full path, and `--resume` needs `--log`.
 - Messages logged `uncertain` count toward `limit`. Exclusion lists may be UTF-16 text files, and missing values in a list are skipped.
 - `Cc`, `Bcc`, `Reply-To` and `From` values follow the same address rules as recipients, and every header is checked to be writable before sending, so a bad header fails validation instead of stopping a run partway. `SMTPTransport(data_timeout=None)` waits without a limit.
+- `min_interval` (`--rate`) spaces failed attempts too, so a run that fails from its first message no longer sends a burst.
 - SMTP replies in `detail` read `ann@example.org (550 5.1.1 No such user)` instead of a Python dict of byte strings.
 - The tests send through a local SMTP server (aiosmtpd), including STARTTLS and implicit TLS with a test certificate authority. The `dev` extra installs aiosmtpd, hypothesis and trustme.
 

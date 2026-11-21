@@ -103,6 +103,13 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--exclude", metavar="FILE", help="addresses to skip (.txt one per line, or .csv/.json)")
     g.add_argument("--limit", type=int, help="send at most N messages this run")
     g.add_argument(
+        "--max-failures",
+        type=int,
+        default=5,
+        metavar="N",
+        help="stop after N failed messages in a row, not counting unknown addresses (default 5; 0 never stops)",
+    )
+    g.add_argument(
         "--rate",
         type=float,
         default=20.0,
@@ -151,6 +158,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.resume and not args.log:
         parser.error("--resume needs --log FILE: the log of the run you are continuing")
+    if args.max_failures < 0:
+        parser.error("--max-failures must be 0 (never stop) or more")
+    sending = False
     try:
         if args.html and len(args.html) != len(args.template):
             raise TemplateError("give --html once for each --template (same order)")
@@ -192,6 +202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Aborted; nothing was sent.")
             return 1
         interval = 60.0 / args.rate if args.rate and args.rate > 0 else 0.0
+        sending = True
         report = mail_merge(
             templates,
             args.data,
@@ -199,6 +210,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             transport=_transport(args),
             min_interval=interval,
             progress=_print_progress,
+            max_consecutive_failures=args.max_failures,
             **common,
         )
         print(f"\nDone: {report.summary()}.")
@@ -213,16 +225,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     except DataError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    except (TemplateError, ValueError, FatalSendError) as exc:
+    except FatalSendError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        if sending:
+            print(_resume_advice(args), file=sys.stderr)
+        return 2
+    except (TemplateError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
-        if args.no_log:
-            advice = "This run had no log, so it cannot be resumed; the messages listed as sent were delivered."
-        else:
-            advice = "Re-run with --resume (and the same --log) to continue."
-        print(f"\nInterrupted. {advice}", file=sys.stderr)
+        print(f"\nInterrupted. {_resume_advice(args)}", file=sys.stderr)
         return 130
+
+
+def _resume_advice(args: argparse.Namespace) -> str:
+    if args.no_log:
+        return "This run had no log, so it cannot be resumed; the messages listed as sent were delivered."
+    return "Re-run with --resume (and the same --log) to continue."
 
 
 def _show_log(path: Path) -> None:

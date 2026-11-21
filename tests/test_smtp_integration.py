@@ -18,6 +18,7 @@ pytest.importorskip("aiosmtpd")
 from aiosmtpd.controller import Controller  # noqa: E402
 
 from email_merge_tool import (  # noqa: E402
+    AccountRefusedError,
     FatalSendError,
     PermanentSendError,
     SMTPConfig,
@@ -382,3 +383,78 @@ def test_rcpt_5xx_fails_at_once(server, people, sleeps, tmp_path):
     assert [r.status for r in report.results] == ["failed", "sent"]
     assert report.results[0].detail == "recipient refused: ann@example.org (550 5.1.1 No such user)"
     assert server.commands.count(("RCPT", "ann@example.org")) == 1 and sleeps == []
+
+
+def rows(n):
+    return [{"email": f"r{i}@example.org", "first_name": f"R{i}"} for i in range(1, n + 1)]
+
+
+def logged(tmp_path):
+    return [(r["to"], r["status"]) for r in read_log(tmp_path / "log.jsonl")]
+
+
+def test_daily_quota_stops_the_run_and_resume_continues(server, people, sleeps, tmp_path):
+    server.mail = [None, None, "550 5.4.5 Daily user sending limit exceeded."]
+    with pytest.raises(AccountRefusedError, match="5.4.5 Daily user sending limit") as info:
+        send(server, people, tmp_path=tmp_path)
+    assert (info.value.smtp_code, info.value.smtp_error) == (550, "5.4.5 Daily user sending limit exceeded.")
+    assert server.count("MAIL") == 3  # nothing after the refusal
+    assert logged(tmp_path) == [("ann@example.org", "sent"), ("bo@example.org", "sent"), ("cy@example.org", "failed")]
+
+    again = send(server, people, tmp_path=tmp_path, resume=True)  # the next day
+    assert [r.status for r in again.results] == ["skipped", "skipped", "sent", "sent"]
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("stage", "reply"),
+    [
+        ("data", "554 5.2.0 STOREDRV.Submission.Exception:SubmissionQuotaExceededException; Cannot submit message."),
+        ("mail", "530 5.7.0 Authentication required"),
+        ("mail", "553 5.7.1 Sender address rejected: not owned by user team@example.org"),
+        ("rcpt", "450 4.7.1 Rate limit exceeded, try again later"),
+        ("data", "451 4.7.0 Too many messages, slow down"),
+        ("mail", "421 4.7.0 Sending rate limited, closing connection"),
+    ],
+)
+def test_account_level_replies_stop_at_once(server, people, sleeps, tmp_path, stage, reply):
+    if stage == "rcpt":
+        server.rcpt["ann@example.org"] = [reply]
+    else:
+        setattr(server, stage, [reply])
+    with pytest.raises(AccountRefusedError, match=reply[:3]):
+        send(server, people, tmp_path=tmp_path)
+    assert logged(tmp_path) == [("ann@example.org", "failed")]
+    assert server.delivered == [] and sleeps == []  # not retried, and nobody else tried
+
+
+def test_failures_in_a_row_stop_the_run(server, sleeps, tmp_path):
+    server.data = ["554 5.7.1 Message rejected"] * 10
+    with pytest.raises(FatalSendError, match="stopped after 3 failed messages in a row") as info:
+        send(server, rows(6), tmp_path=tmp_path, max_consecutive_failures=3)
+    assert not isinstance(info.value, AccountRefusedError)
+    assert "554 5.7.1 Message rejected" in str(info.value)
+    assert server.count("DATA") == 3
+    assert [status for _, status in logged(tmp_path)] == ["failed"] * 3
+
+
+def test_the_default_stop_is_five_failures(server, sleeps):
+    server.data = ["554 5.7.1 Message rejected"] * 10
+    with pytest.raises(FatalSendError, match="stopped after 5 failed"):
+        send(server, rows(7))
+    assert server.count("DATA") == 5
+
+
+def test_zero_never_stops_and_failures_are_spaced(server, sleeps):
+    server.data = ["554 5.7.1 Message rejected"] * 6
+    report = send(server, rows(6), max_consecutive_failures=0, min_interval=3)
+    assert report.failed == 6
+    assert sleeps == [3] * 5  # min_interval applies between failed attempts too
+
+
+def test_unknown_addresses_do_not_count_and_a_sent_message_resets(server, sleeps):
+    for i in (1, 2, 3):
+        server.rcpt[f"r{i}@example.org"] = ["550 5.1.1 No such user"]
+    server.data = ["554 5.7.1 Message rejected", None, "554 5.7.1 Message rejected", None]
+    report = send(server, rows(7), max_consecutive_failures=2)
+    assert [r.status for r in report.results] == ["failed"] * 4 + ["sent", "failed", "sent"]
