@@ -45,7 +45,7 @@ def test_template_requires_body_and_subject():
     with pytest.raises(TemplateError):
         Template(subject="  ", text="x")
     with pytest.raises(TemplateError, match="unsupported header"):
-        Template(subject="s", text="x", headers={"X-Foo": "1"})
+        Template(subject="s", text="x", headers={"Foo": "1"})
 
 
 def test_html_only_template_gets_text_alternative():

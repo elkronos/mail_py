@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -23,7 +24,7 @@ from .data import (
 from .experiment import Assignment, assign_variants, write_assignments
 from .message import attachment_name, build_message, stamp_date, wire_bytes
 from .sendlog import SendLog, sent_addresses
-from .templates import Template, TemplateError, fill, load_template, placeholders
+from .templates import ADDRESS_HEADERS, Template, TemplateError, fill, header_name, load_template, placeholders
 from .transport import (
     DryRunTransport,
     FatalSendError,
@@ -138,6 +139,7 @@ def mail_merge(
     min_interval: float = 0.0,
     list_unsubscribe: str | None = None,
     one_click_unsubscribe: bool = False,
+    extra_headers: Mapping[str, str] | None = None,
     allow_duplicates: bool = False,
     attachments: Sequence[str | Path] = (),
     attachment_field: str | None = None,
@@ -185,6 +187,11 @@ def mail_merge(
         list_unsubscribe: ``List-Unsubscribe`` header value; may contain
             placeholders, e.g. ``"<https://example.org/unsub?id={id}>"``.
         one_click_unsubscribe: Add the RFC 8058 one-click header too.
+        extra_headers: More headers for every message, e.g.
+            ``{"Feedback-ID": "{campaign}:lab", "X-Campaign": "spring"}``;
+            values may contain placeholders. The names a template may set
+            are allowed (see :func:`header_name`), except ``Subject`` and
+            ``From``. A header may not be set both here and in a template.
         allow_duplicates: Permit the same address on more than one row.
         attachments: Files attached to every message.
         attachment_field: Column with per-recipient file path(s), separated
@@ -228,7 +235,8 @@ def mail_merge(
     if max_consecutive_failures < 0:
         raise ValueError("max_consecutive_failures must be >= 0 (0 turns the check off)")
 
-    fields: set[str] = set().union(*(t.fields for t in tpls.values()))
+    extra = _extra_headers(extra_headers or {}, tpls)
+    fields: set[str] = set().union(*(t.fields for t in tpls.values()), *(placeholders(v) for v in extra.values()))
     if list_unsubscribe:
         fields |= placeholders(list_unsubscribe)
     if strata:
@@ -305,7 +313,14 @@ def mail_merge(
     for row, (record, variant) in enumerate(zip(records, variants, strict=True), start=1):
         try:
             rendered = tpls[variant].render(record, to_field=to_field)
-            for name, value in rendered.headers.items():
+            if extra:
+                filled = {name: fill(value, record) for name, value in extra.items()}
+                for name, value in filled.items():
+                    if "\r" in value or "\n" in value:
+                        raise TemplateError(f"{name} header would contain a line break (possible header injection)")
+                rendered = dataclasses.replace(rendered, headers={**rendered.headers, **filled})
+            for name in ADDRESS_HEADERS:
+                value = rendered.headers.get(name, "")
                 if value and not _valid_address_list(value):
                     raise TemplateError(f"invalid address in {name}: {value!r}")
             unsub = fill(list_unsubscribe, record) if list_unsubscribe else None
@@ -472,6 +487,28 @@ def _reuse_issue(path: Path, logged: set[str]) -> Issue:
         "(--resume, or resume=True), or use a new log file for a new mailing",
         where="send log",
     )
+
+
+def _extra_headers(headers: Mapping[str, str], tpls: Mapping[str, Template]) -> dict[str, str]:
+    """Check ``extra_headers`` and return it with the usual header spelling.
+
+    Raises:
+        TemplateError: a name a template may not set, ``Subject`` or ``From``,
+            the same header twice, or a header a template also sets.
+    """
+    result: dict[str, str] = {}
+    for key, value in headers.items():
+        name = header_name(key)
+        if name in ("Subject", "From"):
+            where = "the template" if name == "Subject" else "the template or sender="
+            raise TemplateError(f"set {name} in {where}, not in extra_headers")
+        if name.lower() in {n.lower() for n in result}:
+            raise TemplateError(f"extra_headers sets {name} twice")
+        for tpl in tpls.values():
+            if name.lower() in {n.lower() for n in tpl.headers}:
+                raise TemplateError(f"{name} is set both in extra_headers and in template {tpl.name!r}")
+        result[name] = value
+    return result
 
 
 def _repeated_name(names: Sequence[str], start: int) -> str | None:

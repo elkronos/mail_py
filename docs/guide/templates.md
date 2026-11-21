@@ -13,9 +13,13 @@ Dear {first_name},
 ```
 
 - The optional **header block** comes first and ends with a blank line.
-  Allowed headers are `Subject`, `From`, `Reply-To`, `Cc` and `Bcc`
-  (case-insensitive). Any other line inside the block is an error. This catches
-  typos such as `Subjcet:`, which would otherwise silently become body text.
+  Allowed headers are `Subject`, the address headers `From`, `Sender`,
+  `Reply-To`, `Cc` and `Bcc`, the
+  [provider and list headers](#provider-and-custom-headers) below, and any
+  header whose name starts with `X-` (names are case-insensitive). Any other
+  line inside the block is an error. This catches typos such as `Subjcet:`,
+  which would otherwise silently become body text, and the error suggests the
+  header you probably meant.
 - The header block is only recognized if the **first line** is one of those
   headers, so a body starting with `Note: ...` is safe.
 - `Subject` is required, either in the file or via `load_template(..., subject=...)`.
@@ -29,6 +33,45 @@ Dear {first_name},
 - The `Subject` must not be blank once its placeholders are filled in.
 - `Bcc` recipients get the message but the header is removed before sending, as
   the SMTP standard requires. They are not hidden from the send log.
+- `Sender` names the mailbox that sends when `From` is someone else,
+  such as a department address you send on behalf of. It must be one valid
+  address. The SMTP transport also uses it as the envelope sender, so bounces
+  go to it.
+
+## Provider and custom headers
+
+Sending services read their own headers to route mail, group statistics and
+handle feedback loops. A template can set them in its header block:
+
+```text
+Subject: Spring survey
+Feedback-ID: {campaign}:lab:survey
+X-SES-CONFIGURATION-SET: spring-2026
+X-PM-Message-Stream: broadcast
+X-Campaign: {campaign}
+
+Dear {first_name},
+...
+```
+
+Besides any `X-` header, these are allowed: `Feedback-ID` (Gmail's feedback
+loop), `List-Id`, `List-Archive`, `List-Help`, `List-Owner`, `List-Post`,
+`List-Subscribe`, `Auto-Submitted`, `Precedence`, `Organization`, `Keywords`
+and `Comments`. Values may contain placeholders and follow the same line-break
+check as other headers; a header whose value is empty for a row is left out of
+that message. ASCII values are written exactly as given, folded only at
+spaces, so long tokens reach the provider intact.
+
+To add the same headers to every template, pass
+`mail_merge(..., extra_headers={"X-Campaign": "spring"})` or repeat
+`--header "X-Campaign: spring"` on the command line. A header may be set in
+the templates or there, not both.
+
+The tool writes some headers itself and refuses them in templates:
+`To` (from the address column), `Date` (set when each message is sent),
+`Message-ID`, `MIME-Version`, every `Content-*` header, `List-Unsubscribe`
+and `List-Unsubscribe-Post` (use `list_unsubscribe=` and `--one-click`), and
+`Return-Path` (set by the receiving server).
 
 ## Placeholders
 

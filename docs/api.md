@@ -20,6 +20,8 @@ Everything below can be imported from `email_merge_tool`.
 
 ::: email_merge_tool.html_to_text
 
+::: email_merge_tool.header_name
+
 ::: email_merge_tool.TemplateError
 
 ## Data
@@ -55,6 +57,8 @@ Everything below can be imported from `email_merge_tool`.
 ::: email_merge_tool.DryRunTransport
 
 ::: email_merge_tool.build_message
+
+::: email_merge_tool.wire_bytes
 
 ::: email_merge_tool.PermanentSendError
 

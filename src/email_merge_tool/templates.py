@@ -17,6 +17,7 @@ header injection.
 
 from __future__ import annotations
 
+import difflib
 import html
 import re
 from collections.abc import Mapping
@@ -25,6 +26,9 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 __all__ = [
+    "ADDRESS_HEADERS",
+    "ALLOWED_HEADERS",
+    "EXTRA_HEADERS",
     "Template",
     "RenderedMessage",
     "TemplateError",
@@ -32,17 +36,86 @@ __all__ = [
     "html_to_text",
     "placeholders",
     "fill",
+    "header_name",
 ]
 
 _PLACEHOLDER = re.compile(r"\{\{([A-Za-z_]\w*)\}\}|\{([A-Za-z_]\w*)\}")
 
-#: Headers a template file may set in its header block.
-ALLOWED_HEADERS = ("Subject", "From", "Reply-To", "Cc", "Bcc")
+#: Address headers a template may set. Each value is checked as addresses.
+ADDRESS_HEADERS = ("From", "Sender", "Reply-To", "Cc", "Bcc")
+
+#: Other headers a template may set, for provider routing and list handling.
+#: Any header whose name starts with ``X-`` is allowed too.
+EXTRA_HEADERS = (
+    "Feedback-ID",
+    "List-Id",
+    "List-Archive",
+    "List-Help",
+    "List-Owner",
+    "List-Post",
+    "List-Subscribe",
+    "Auto-Submitted",
+    "Precedence",
+    "Organization",
+    "Keywords",
+    "Comments",
+)
+
+#: Headers a template file may set in its header block, besides ``X-`` headers.
+ALLOWED_HEADERS = ("Subject", *ADDRESS_HEADERS, *EXTRA_HEADERS)
 _ALLOWED_LOWER = {h.lower(): h for h in ALLOWED_HEADERS}
+
+# Headers the tool writes itself, and what to use instead.
+_OWNED_HEADERS = {
+    "to": "To comes from the address column (to_field, --to-field)",
+    "date": "the tool sets Date when each message is sent",
+    "message-id": "the tool sets Message-ID",
+    "mime-version": "the tool sets MIME-Version",
+    "list-unsubscribe": "use list_unsubscribe= (--list-unsubscribe)",
+    "list-unsubscribe-post": "use one_click_unsubscribe= (--one-click)",
+    "return-path": "the receiving server sets Return-Path from the envelope sender",
+}
+
+# A header field name (RFC 5322 section 2.2): printable ASCII except the colon.
+_FIELD_NAME = re.compile(r"[!-9;-~]+")
 
 
 class TemplateError(ValueError):
     """Raised for malformed templates or values that cannot be rendered."""
+
+
+def header_name(name: str) -> str:
+    """The spelling a template uses for header ``name``, checked against what templates may set.
+
+    Known headers get their usual capitalization; ``X-`` headers keep the
+    given spelling.
+
+    Raises:
+        TemplateError: the header is one the tool writes itself (``To``,
+            ``Date``, ``Content-*`` and others), or is neither a known header
+            nor an ``X-`` header.
+    """
+    key = name.strip()
+    lower = key.lower()
+    if lower in _ALLOWED_LOWER:
+        return _ALLOWED_LOWER[lower]
+    if lower in _OWNED_HEADERS or lower.startswith("content-"):
+        reason = _OWNED_HEADERS.get(lower, f"the tool sets the {key} header")
+        raise TemplateError(f"a template cannot set {key!r}: {reason}")
+    if lower.startswith("x-") and len(key) > 2 and _FIELD_NAME.fullmatch(key):
+        return key
+    hint = difflib.get_close_matches(key, ALLOWED_HEADERS, n=1)
+    suggestion = f" (did you mean {hint[0]!r}?)" if hint else ""
+    allowed = ", ".join(ALLOWED_HEADERS)
+    raise TemplateError(f"unsupported header {key!r}{suggestion}; allowed: {allowed}, and any header starting with X-")
+
+
+def _is_header_name(name: str) -> bool:
+    try:
+        header_name(name)
+    except TemplateError:
+        return False
+    return True
 
 
 def placeholders(text: str | None) -> set[str]:
@@ -97,8 +170,9 @@ class Template:
         subject: Subject line; may contain placeholders.
         text: Plain-text body; may contain placeholders.
         html: HTML body; may contain placeholders (values are HTML-escaped).
-        headers: Extra headers from :data:`ALLOWED_HEADERS` other than Subject
-            (``From``, ``Reply-To``, ``Cc``, ``Bcc``); may contain placeholders.
+        headers: Headers other than Subject: :data:`ADDRESS_HEADERS`,
+            :data:`EXTRA_HEADERS` such as ``Feedback-ID``, and any ``X-``
+            header; may contain placeholders.
         name: Label used for this template in logs and experiment assignments.
     """
 
@@ -115,10 +189,11 @@ class Template:
             raise TemplateError(f"template {self.name!r} has an empty subject")
         normalized: dict[str, str] = {}
         for key, value in self.headers.items():
-            canonical = _ALLOWED_LOWER.get(key.lower())
-            if canonical is None or canonical == "Subject":
-                allowed = ", ".join(h for h in ALLOWED_HEADERS if h != "Subject")
-                raise TemplateError(f"unsupported header {key!r}; allowed: {allowed}")
+            canonical = header_name(key)
+            if canonical == "Subject":
+                raise TemplateError("give the subject as subject=, not as a header")
+            if canonical.lower() in {k.lower() for k in normalized}:
+                raise TemplateError(f"template {self.name!r} sets the {canonical} header twice")
             normalized[canonical] = value
         object.__setattr__(self, "headers", normalized)
 
@@ -160,25 +235,31 @@ def _split_header_block(raw: str, source: str) -> tuple[dict[str, str], str]:
     """Split an optional leading ``Header: value`` block from the body.
 
     A header block is recognised only when the first line starts with one of
-    :data:`ALLOWED_HEADERS`, so a body that begins with "Note: ..." is not
-    misread. Inside a header block every line must be an allowed header, which
-    turns typos such as ``Subjcet:`` into clear errors instead of silent body text.
+    :data:`ALLOWED_HEADERS` or an ``X-`` header, so a body that begins with
+    "Note: ..." is not misread. Inside a header block every line must be a
+    header a template may set, which turns typos such as ``Subjcet:`` into
+    clear errors instead of silent body text.
     """
     lines = raw.splitlines(keepends=True)
-    first = lines[0].split(":", 1)[0].strip().lower() if lines and ":" in lines[0] else ""
-    if first not in _ALLOWED_LOWER:
+    first = lines[0].split(":", 1)[0] if lines and ":" in lines[0] else ""
+    if not first or not _is_header_name(first):
         return {}, raw
     headers: dict[str, str] = {}
     for index, line in enumerate(lines):
         if not line.strip():
             return headers, "".join(lines[index + 1 :])
         key, sep, value = line.partition(":")
-        canonical = _ALLOWED_LOWER.get(key.strip().lower())
-        if not sep or canonical is None:
+        if not sep:
             raise TemplateError(
-                f"{source}, line {index + 1}: expected one of "
-                f"{', '.join(ALLOWED_HEADERS)} or a blank line before the body, got {line.strip()!r}"
+                f"{source}, line {index + 1}: expected 'Name: value' or a blank line before the body, "
+                f"got {line.strip()!r}"
             )
+        try:
+            canonical = header_name(key)
+        except TemplateError as exc:
+            raise TemplateError(f"{source}, line {index + 1}: {exc}") from None
+        if canonical in headers:
+            raise TemplateError(f"{source}, line {index + 1}: {canonical} is already set on an earlier line")
         headers[canonical] = value.strip()
     raise TemplateError(f"{source}: header block must be followed by a blank line and a body")
 

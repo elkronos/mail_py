@@ -18,7 +18,9 @@ from email_merge_tool import (
     SMTPConfig,
     SMTPTransport,
     Template,
+    TemplateError,
     build_message,
+    load_template,
     mail_merge,
 )
 from email_merge_tool.cli import main
@@ -410,3 +412,94 @@ def test_dry_run_write_errors_stop_the_run_cleanly(people, tmp_path, capsys):
     data.write_text("email\nann@example.org\n", encoding="utf-8")
     assert main(["-t", str(template), "-d", str(data), "--from", SENDER, "--output-dir", str(afile)]) == 2
     assert "error: cannot write the dry-run messages to" in capsys.readouterr().err
+
+
+PROVIDER_TEMPLATE = """\
+Subject: Spring survey
+Sender: Survey Office <office@example.org>
+Feedback-ID: {campaign}:lab:survey
+X-SES-CONFIGURATION-SET: spring-2026
+x-pm-message-stream: broadcast
+Auto-Submitted: auto-generated
+X-Campaign: {campaign}
+
+Dear {first_name},
+"""
+
+
+def test_template_header_block_sets_provider_headers_and_sender(people, tmp_path):
+    path = tmp_path / "survey.txt"
+    path.write_text(PROVIDER_TEMPLATE, encoding="utf-8")
+    tpl = load_template(path)
+    assert list(tpl.headers) == [
+        "Sender",
+        "Feedback-ID",
+        "X-SES-CONFIGURATION-SET",
+        "x-pm-message-stream",
+        "Auto-Submitted",
+        "X-Campaign",
+    ]
+    rows = [dict(p, campaign="c" + "7" * 100) for p in people]  # a long token stays one word
+    message = mail_merge(tpl, rows, sender=SENDER).messages[0]
+    wire = wire_bytes(message)
+    assert b"\r\nSender: Survey Office <office@example.org>\r\n" in wire
+    assert f"\r\nFeedback-ID: c{'7' * 100}:lab:survey\r\n".encode() in wire
+    assert b"\r\nx-pm-message-stream: broadcast\r\n" in wire and b"=?" not in wire
+    assert message["Auto-Submitted"] == "auto-generated"
+
+
+@pytest.mark.parametrize(
+    ("name", "reason"),
+    [
+        ("Content-Type", "the tool sets the Content-Type header"),
+        ("MIME-Version", "the tool sets MIME-Version"),
+        ("To", "To comes from the address column"),
+        ("Date", "when each message is sent"),
+        ("List-Unsubscribe", "use list_unsubscribe="),
+        ("Subjcet", "did you mean 'Subject'"),
+        ("Campaign", "any header starting with X-"),
+    ],
+)
+def test_headers_the_tool_owns_are_refused(tmp_path, name, reason):
+    with pytest.raises(TemplateError, match=re.escape(reason)):
+        Template(subject="s", text="t", headers={name: "x"})
+    path = tmp_path / "t.txt"
+    path.write_text(f"Subject: s\n{name}: x\n\nbody\n", encoding="utf-8")
+    with pytest.raises(TemplateError, match=f"line 2: .*{re.escape(reason)}"):
+        load_template(path)
+
+
+def test_extra_headers_for_every_message(people, tmp_path):
+    report = mail_merge(TPL, people, sender=SENDER, extra_headers={"x-campaign": "spring-{id}", "Precedence": "bulk"})
+    assert [m["X-Campaign"] for m in report.messages] == ["spring-1", "spring-2", "spring-3", "spring-4"]
+    assert report.messages[0]["Precedence"] == "bulk"
+    rows = [dict(p, tag="a\x07b" if p["id"] == "2" else "ok") for p in people]
+    with pytest.raises(DataError, match="row 2: the X-Tag header contains a control character"):
+        mail_merge(TPL, rows, sender=SENDER, extra_headers={"X-Tag": "{tag}"})
+    with pytest.raises(TemplateError, match="set From in the template or sender="):
+        mail_merge(TPL, people, sender=SENDER, extra_headers={"From": "x@example.org"})
+    tagged = Template(subject="s", text="t", headers={"X-Tag": "a"}, name="tagged")
+    with pytest.raises(TemplateError, match="X-TAG is set both in extra_headers and in template 'tagged'"):
+        mail_merge(tagged, people, sender=SENDER, extra_headers={"X-TAG": "b"})
+
+
+def test_sender_must_be_one_mailbox(people):
+    tpl = Template(subject="s", text="t", headers={"Sender": "{office}"})
+    rows = [dict(p, office="office@example.org") for p in people]
+    rows[0]["office"] = "a@example.org, b@example.org"
+    with pytest.raises(DataError, match="row 1: Sender must be exactly one valid address"):
+        mail_merge(tpl, rows, sender=SENDER)
+
+
+def test_header_option_on_the_command_line(tmp_path, capsys):
+    template = tmp_path / "t.txt"
+    template.write_text("Subject: Hi\n\nHello\n", encoding="utf-8")
+    data = tmp_path / "people.csv"
+    data.write_text("email,id\nann@example.org,7\n", encoding="utf-8")
+    out = tmp_path / "out"
+    base = ["-t", str(template), "-d", str(data), "--from", SENDER, "--output-dir", str(out)]
+    assert main([*base, "--header", "Feedback-ID: {id}:lab", "--header", "X-Campaign: spring"]) == 0
+    (eml,) = out.glob("*.eml")
+    assert b"\r\nFeedback-ID: 7:lab\r\nX-Campaign: spring\r\n" in eml.read_bytes()
+    assert main([*base, "--header", "X-Campaign spring"]) == 2
+    assert "--header needs 'Name: value'" in capsys.readouterr().err

@@ -21,6 +21,7 @@ Without `--send`, the command validates everything, prints the first message
 | `--from ADDRESS` | Sender, e.g. `"Lab <lab@example.org>"`. Not needed if the template has `From:`, which replaces it (with a warning when they differ). |
 | `--list-unsubscribe VALUE` | `List-Unsubscribe` header: one or more `<URI>` values separated by commas. Placeholders are allowed. |
 | `--one-click` | Add the RFC 8058 `List-Unsubscribe-Post` header (needs an `https` URI). |
+| `--header 'NAME: VALUE'` | Add a header to every message, such as `Feedback-ID` or an `X-` header. Placeholders are allowed. Repeatable. See [provider and custom headers](guide/templates.md#provider-and-custom-headers). |
 | `--attach FILE` | Attach a file to every message. Repeatable. |
 | `--attachment-field COLUMN` | Column with per-recipient file path(s), `;`-separated. Placeholders are allowed. |
 | `--allow-duplicates` | Permit an address on several rows. |

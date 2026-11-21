@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .data import _parse_mailbox
-from .templates import RenderedMessage
+from .templates import ADDRESS_HEADERS, RenderedMessage
 
 __all__ = [
     "POLICY",
@@ -90,7 +90,7 @@ _VERBATIM_CLASSES: dict[str, type[BaseHeader]] = {}
 def _verbatim_header(name: str, tokens: Sequence[str]) -> BaseHeader:
     """A header object for ``name`` whose value is ``tokens`` joined by spaces."""
     value = " ".join(tokens)
-    if not value.isascii() or any(len(name) + 2 + len(token) > _MAX_LINE for token in tokens):
+    if not tokens or not value.isascii() or any(len(name) + 2 + len(token) > _MAX_LINE for token in tokens):
         raise ValueError(f"{name} must be ASCII, with no part longer than {_MAX_LINE - len(name) - 2} characters")
     cls = _VERBATIM_CLASSES.get(name.lower())
     if cls is None:
@@ -264,6 +264,18 @@ def _transfer_encoding(text: str) -> str:
     return "quoted-printable" if len(quopri.encodestring(data)) <= len(base64.encodebytes(data)) else "base64"
 
 
+def _extra_header(name: str, value: str) -> str | BaseHeader:
+    """The value to store for a provider or list header such as ``Feedback-ID``.
+
+    An ASCII value is written as given, folded only at its spaces, because
+    providers read these headers as plain tokens and the email package would
+    RFC 2047-encode a long one. Other values are left to the email package.
+    """
+    if any(unicodedata.category(c) == "Cc" for c in value):
+        raise ValueError(f"the {name} header contains a control character: {value!r}")
+    return _verbatim_header(name, value.split()) if value.isascii() else value
+
+
 def _unsubscribe_uris(value: str) -> list[str]:
     """Split a List-Unsubscribe value into its ``<URI>`` parts, or raise ValueError."""
     if "\r" in value or "\n" in value:
@@ -335,6 +347,13 @@ def build_message(
     if mailbox is None:
         raise ValueError(f"From must be exactly one valid address, got {from_value!r} ({reason})")
     msg["From"] = from_value
+    on_behalf = rendered.headers.get("Sender", "")
+    if on_behalf:
+        if _parse_mailbox(on_behalf)[0] is None:
+            raise ValueError(
+                f"Sender must be exactly one valid address, got {on_behalf!r} ({_parse_mailbox(on_behalf)[1]})"
+            )
+        msg["Sender"] = on_behalf
     msg["To"] = rendered.to
     for name in ("Cc", "Bcc", "Reply-To"):
         if rendered.headers.get(name):
@@ -353,6 +372,9 @@ def build_message(
             msg["List-Unsubscribe-Post"] = _verbatim_header("List-Unsubscribe-Post", ["List-Unsubscribe=One-Click"])
     elif one_click_unsubscribe:
         raise ValueError("one_click_unsubscribe requires list_unsubscribe")
+    for name, value in rendered.headers.items():
+        if name not in ADDRESS_HEADERS and value.strip():
+            msg[name] = _extra_header(name, value)
     msg.set_content(rendered.text, cte=_transfer_encoding(rendered.text))
     if rendered.html is not None:
         msg.add_alternative(rendered.html, subtype="html", cte=_transfer_encoding(rendered.html))
@@ -368,7 +390,7 @@ def _now() -> datetime:
 def stamp_date(message: Message) -> None:
     """Set the ``Date`` header to the current time in UTC (``+0000``).
 
-    ``mail_merge`` calls this just before handing each message to the
+    ``mail_merge`` calls this right before handing each message to the
     transport, so the date is the send time even late in a long, rate-limited
     run; SpamAssassin scores a ``Date`` three or more hours old as suspicious.
     The header keeps its place among the others.

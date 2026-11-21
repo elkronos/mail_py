@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Templates may set `Sender`, provider and list headers such as `Feedback-ID`, `List-Id`, `Auto-Submitted` and `Precedence`, and any `X-` header, such as `X-SES-CONFIGURATION-SET` or `X-PM-Message-Stream`. `mail_merge(extra_headers=...)` and `email-merge --header 'Name: value'` add headers to every message. Placeholders are allowed, and ASCII values are written as given. Headers the tool writes itself (`To`, `Date`, `Message-ID`, `MIME-Version`, `Content-*`, `List-Unsubscribe`) are refused with what to use instead, and a misspelled header name gets a suggestion.
 - A run stops at once when the server refuses the account rather than one message: a sending quota (Gmail's `5.4.5`, Microsoft's `SubmissionQuotaExceeded`), a `4.7.x` or `5.7.x` reply about a rate or limit, a login asked for while sending (530, 535), or a refused sender address. It raises the new `AccountRefusedError` (a `FatalSendError`), and the message that met the refusal is logged as `failed` so resume sends it. Before, the run tried every remaining recipient and logged each as failed.
 - `mail_merge(max_consecutive_failures=5)` and `email-merge --max-failures N` stop a run after N failed messages in a row; refusals of unknown addresses or full mailboxes (`5.1.x`, `5.2.x`) do not count, and `0` turns the check off. After a stop mid-run, the CLI says to re-run with `--resume`.
 - `PermanentSendError` and `AccountRefusedError` carry the server's reply as `smtp_code` and `smtp_error`.

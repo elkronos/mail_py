@@ -73,6 +73,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-unsubscribe", metavar="VALUE", help='List-Unsubscribe header, e.g. "<https://example.org/u?id={id}>"'
     )
     g.add_argument("--one-click", action="store_true", help="add RFC 8058 one-click unsubscribe header")
+    g.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        metavar="'NAME: VALUE'",
+        help="add a header to every message, e.g. 'Feedback-ID: {campaign}:lab'; repeatable",
+    )
     g.add_argument("--attach", action="append", default=[], metavar="FILE", help="attach FILE to every message")
     g.add_argument("--attachment-field", metavar="COLUMN", help="column with per-recipient file path(s), ';'-separated")
     g.add_argument("--allow-duplicates", action="store_true", help="allow an address on several rows")
@@ -142,6 +149,18 @@ def _transport(args: argparse.Namespace) -> SMTPTransport:
     return SMTPTransport(config)
 
 
+def _header_options(values: Sequence[str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for item in values:
+        name, sep, value = item.partition(":")
+        if not sep or not name.strip():
+            raise TemplateError(f"--header needs 'Name: value', got {item!r}")
+        if name.strip().lower() in {n.lower() for n in headers}:
+            raise TemplateError(f"--header {name.strip()} is given twice")
+        headers[name.strip()] = value.strip()
+    return headers
+
+
 def _print_progress(result: Result) -> None:
     extra = f" [{result.variant}]" if result.variant else ""
     detail = f" ({result.detail})" if result.detail else ""
@@ -185,6 +204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             limit=args.limit,
             list_unsubscribe=args.list_unsubscribe,
             one_click_unsubscribe=args.one_click,
+            extra_headers=_header_options(args.header),
             allow_duplicates=args.allow_duplicates,
             attachments=args.attach,
             attachment_field=args.attachment_field,
@@ -261,7 +281,7 @@ def _show_preview(report: MergeReport, count: int) -> None:
         print(issue, file=sys.stderr)
     for message in report.messages[:count]:
         print("-" * 72)
-        for name in ("From", "To", "Cc", "Reply-To", "Subject", "List-Unsubscribe"):
+        for name in ("From", "Sender", "To", "Cc", "Reply-To", "Subject", "List-Unsubscribe"):
             if message[name]:
                 print(f"{name}: {message[name]}")
         print()

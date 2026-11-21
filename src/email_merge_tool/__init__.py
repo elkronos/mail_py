@@ -26,9 +26,17 @@ from .data import (  # noqa: E402
 )
 from .experiment import Assignment, assign_variants, write_assignments  # noqa: E402
 from .merge import MergeReport, Result, mail_merge  # noqa: E402
-from .message import build_message  # noqa: E402
+from .message import build_message, wire_bytes  # noqa: E402
 from .sendlog import read_log, sent_addresses  # noqa: E402
-from .templates import RenderedMessage, Template, TemplateError, fill, html_to_text, load_template  # noqa: E402
+from .templates import (  # noqa: E402
+    RenderedMessage,
+    Template,
+    TemplateError,
+    fill,
+    header_name,
+    html_to_text,
+    load_template,
+)
 from .transport import (  # noqa: E402
     PRESETS,
     AccountRefusedError,
@@ -53,6 +61,7 @@ __all__ = [
     "load_template",
     "fill",
     "html_to_text",
+    "header_name",
     "load_recipients",
     "validate_recipients",
     "is_valid_address",
@@ -64,6 +73,7 @@ __all__ = [
     "write_assignments",
     "Assignment",
     "build_message",
+    "wire_bytes",
     "read_log",
     "sent_addresses",
     "PRESETS",
