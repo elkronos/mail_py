@@ -6,11 +6,13 @@ from email import message_from_bytes, policy
 import pytest
 
 from email_merge_tool import (
+    AccountRefusedError,
     DataError,
     FatalSendError,
     SMTPConfig,
     SMTPTransport,
     Template,
+    TransportError,
     mail_merge,
     read_log,
     sent_addresses,
@@ -568,3 +570,98 @@ def test_starttls_on_port_465_times_out_with_a_hint(monkeypatch):
     transport = SMTPTransport(SMTPConfig("smtp.example.org", 465, "starttls"))
     with pytest.raises(FatalSendError, match=r"could not connect to smtp.example.org:465 \(timed out\); port 465"):
         transport.open()
+
+
+def test_a_refused_login_on_reconnect_stops_at_once(people, fake_smtp, tmp_path):
+    def password_changed(result):
+        fake_smtp.login_error = smtplib.SMTPAuthenticationError(535, b"5.7.8 bad credentials")
+
+    fake_smtp.failures = [None, smtplib.SMTPServerDisconnected("gone")]
+    with pytest.raises(FatalSendError, match="login to smtp.gmail.com failed") as info:
+        mail_merge(
+            TPL,
+            people,
+            sender=SENDER,
+            dry_run=False,
+            transport=gmail(),
+            log_path=tmp_path / "l",
+            progress=password_changed,
+        )
+    assert fake_smtp.sleeps == [2.0]  # the dropped connection is retried once; the refused login is not
+    assert [r.status for r in info.value.report.results] == ["sent", "failed"]
+
+
+class Scripted:
+    """A custom transport whose send() runs the next step of a script: None delivers, an exception is raised."""
+
+    def __init__(self, *steps, open_error=None, close_error=None):
+        self.steps = list(steps)
+        self.open_error, self.close_error = open_error, close_error
+        self.sent = []
+        self.closed = False
+
+    def open(self):
+        if self.open_error:
+            raise self.open_error
+
+    def send(self, message):
+        step = self.steps.pop(0) if self.steps else None
+        if step is not None:
+            raise step
+        self.sent.append(message["To"])
+
+    def close(self):
+        self.closed = True
+        if self.close_error:
+            raise self.close_error
+
+
+def test_an_unexpected_transport_error_stops_with_the_report(people, tmp_path):
+    log = tmp_path / "log.jsonl"
+    transport = Scripted(None, RuntimeError("HTTP 500 from the provider"))
+    with pytest.raises(TransportError, match="RuntimeError: HTTP 500 from the provider") as info:
+        mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=transport, log_path=log)
+    assert isinstance(info.value, FatalSendError) and isinstance(info.value.__cause__, RuntimeError)
+    assert [(r.to, r.status) for r in info.value.report.results] == [
+        ("ann@example.org", "sent"),
+        ("bo@example.org", "uncertain"),  # the provider may have taken it before failing
+    ]
+    assert [r["status"] for r in read_log(log)] == ["sent", "uncertain"]
+    assert transport.closed
+
+    again = mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=Scripted(), log_path=log, resume=True)
+    assert [r.status for r in again.results] == ["skipped", "skipped", "sent", "sent"]
+
+
+def test_a_transport_that_cannot_open_stops_before_sending(people, tmp_path):
+    transport = Scripted(open_error=ConnectionError("no route to the API"))
+    with pytest.raises(TransportError, match="could not open: ConnectionError: no route to the API") as info:
+        mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=transport, log_path=tmp_path / "l")
+    assert info.value.report.results == [] and transport.sent == []
+
+
+def test_a_failing_close_after_the_run_keeps_the_report(people):
+    transport = Scripted(close_error=OSError("flush failed"))
+    with pytest.raises(TransportError, match="closing the transport failed after the run") as info:
+        mail_merge(TPL, people[:2], sender=SENDER, dry_run=False, transport=transport)
+    assert info.value.report.sent == 2
+
+
+def test_a_failing_close_does_not_hide_the_error_that_stopped_the_run(people, tmp_path):
+    refusal = AccountRefusedError("quota", smtp_code=550, smtp_error="5.4.5 Daily limit")
+    transport = Scripted(None, refusal, close_error=OSError("flush failed"))
+    with pytest.raises(AccountRefusedError) as info:
+        mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=transport, log_path=tmp_path / "l")
+    assert info.value.report.summary() == "sent: 1, failed: 1"
+
+
+def test_sending_without_a_log_warns(people, fake_smtp, tmp_path):
+    def warned(report):
+        return [str(i) for i in report.issues if "sending without a log" in i.message]
+
+    assert warned(mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=gmail())) == [
+        "warning: send log: sending without a log: a run that stops part-way cannot be resumed, and only the "
+        "report (exc.report on an error) says who was sent the message; pass log_path="
+    ]
+    assert not warned(mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=gmail(), log_path=tmp_path / "l"))
+    assert not warned(mail_merge(TPL, people, sender=SENDER))

@@ -30,6 +30,7 @@ from .transport import (
     FatalSendError,
     PermanentSendError,
     Transport,
+    TransportError,
     UncertainSendError,
     _describe_refused,
     _mailbox_problem,
@@ -178,7 +179,8 @@ def mail_merge(
         log_path: JSON Lines send log (audit trail; required for ``resume``).
             If the file already records sent messages, ``resume=True`` is
             required, so running the same command twice cannot email
-            everyone twice.
+            everyone twice. Sending without a log adds a warning to the
+            report, since a run that stops part-way cannot be resumed.
         resume: Skip recipients the log already records as ``sent`` (or
             ``uncertain``).
         limit: Send at most this many messages this run (e.g. a daily quota).
@@ -214,11 +216,17 @@ def mail_merge(
         DataError: validation found errors (see ``exc.issues``), or the send
             log already records sent messages and ``resume`` is false;
             nothing was sent.
-        FatalSendError: the connection or login failed, the server refused
-            the account (:class:`AccountRefusedError`, e.g. a daily quota), or
+        FatalSendError: the connection or login failed, reconnecting
+            failed through every retry, the server refused the account
+            (:class:`AccountRefusedError`, e.g. a daily quota), or
             ``max_consecutive_failures`` messages failed in a row. The message
-            being sent when that happened is logged as ``failed``. See the log
-            for what was already sent, and re-run with ``resume=True``.
+            being sent when that happened is logged as ``failed``. The
+            exception's ``report`` attribute holds the :class:`MergeReport`
+            up to the stop, so the results so far are known with or without
+            a log. Re-run with ``resume=True`` to continue.
+        TransportError: the transport raised another exception (the
+            original is ``__cause__``). It is a :class:`FatalSendError` with
+            ``report`` too; the message being sent is logged ``uncertain``.
     """
     tpls = _as_templates(templates)
     records = load_recipients(recipients)
@@ -268,6 +276,16 @@ def mail_merge(
             issues.insert(0, log_issue)
     if sender and not is_valid_address(sender):
         issues.insert(0, Issue(None, "error", f"invalid sender address {sender!r}"))
+    if not dry_run and log_path is None:
+        issues.append(
+            Issue(
+                None,
+                "warning",
+                "sending without a log: a run that stops part-way cannot be resumed, and only the "
+                "report (exc.report on an error) says who was sent the message; pass log_path=",
+                where="send log",
+            )
+        )
     if not sender and any("From" not in t.headers for t in tpls.values()):
         issues.insert(0, Issue(None, "error", "no sender: pass sender= or add a 'From:' header to the template"))
     for tpl in tpls.values():
@@ -380,8 +398,9 @@ def mail_merge(
     active: Transport = transport if (transport is not None and not dry_run) else DryRunTransport(output_dir)
     delivered = attempted = 0
     consecutive = 0  # failed messages in a row, not counting bad addresses
+    finished = False
     try:
-        active.open()
+        _open(active)
         for to, variant, message in built:
             key = normalize_address(to)
             variant_label = variant if len(tpls) > 1 else None
@@ -399,7 +418,9 @@ def mail_merge(
                 try:
                     result, counts = _deliver(active, message, to, variant_label, dry_run)
                 except FatalSendError as exc:  # e.g. a quota or a failed reconnect: this one was not sent
-                    result, stop = Result(to, "failed", variant_label, str(message["Message-ID"]), str(exc)), exc
+                    # An unexpected exception from a transport says nothing about whether it was sent.
+                    status = "uncertain" if isinstance(exc, TransportError) else "failed"
+                    result, stop = Result(to, status, variant_label, str(message["Message-ID"]), str(exc)), exc
                 except BaseException:
                     if log is not None and getattr(active, "unconfirmed", False):  # e.g. Ctrl-C awaiting the reply
                         log.write(
@@ -440,11 +461,43 @@ def mail_merge(
                 progress(result)
             if stop is not None:
                 raise stop
+        finished = True
+    except FatalSendError as exc:
+        exc.report = report
+        raise
     finally:
-        active.close()
-        if log is not None:
-            log.close()
+        try:
+            _close(active, report, finished)
+        finally:
+            if log is not None:
+                log.close()
     return report
+
+
+def _open(transport: Transport) -> None:
+    try:
+        transport.open()
+    except FatalSendError:
+        raise
+    except Exception as exc:
+        raise TransportError(f"the transport could not open: {_exception_text(exc)}") from exc
+
+
+def _close(transport: Transport, report: MergeReport, finished: bool) -> None:
+    """Close the transport: a failure is an error after a complete run, and a warning while another error stops it."""
+    try:
+        transport.close()
+    except Exception as exc:
+        if not finished:
+            logger.warning("closing the transport failed: %s", _exception_text(exc))
+            return
+        error = TransportError(f"closing the transport failed after the run: {_exception_text(exc)}")
+        error.report = report
+        raise error from exc
+
+
+def _exception_text(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
 def _check_send_log(path: Path, resume: bool, keys: set[str]) -> tuple[set[str], Issue | None]:
@@ -549,6 +602,12 @@ def _deliver(
     except PermanentSendError as exc:
         logger.warning("failed to send to %s: %s", to, exc)
         return Result(to, "failed", variant, message_id, str(exc)), not _mailbox_problem(getattr(exc, "smtp_error", ""))
+    except FatalSendError:
+        raise
+    except Exception as exc:  # outside the transport contract: stop, and keep the report
+        raise TransportError(
+            f"the transport raised {_exception_text(exc)}; the message may or may not have been sent"
+        ) from exc
     refused = refused if isinstance(refused, Mapping) else {}
     key = normalize_address(to)
     mine = {address: reply for address, reply in refused.items() if normalize_address(address) == key}

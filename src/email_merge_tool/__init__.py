@@ -45,6 +45,7 @@ from .transport import (  # noqa: E402
     PermanentSendError,
     SMTPConfig,
     SMTPTransport,
+    TransportError,
     UncertainSendError,
 )
 
@@ -84,4 +85,5 @@ __all__ = [
     "UncertainSendError",
     "FatalSendError",
     "AccountRefusedError",
+    "TransportError",
 ]

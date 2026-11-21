@@ -55,7 +55,7 @@ or an interactive prompt.
 | --- | --- |
 | 0 | Success (a dry run, or every message sent) |
 | 1 | Some messages failed or are `uncertain`, or you declined the confirmation |
-| 2 | Validation, template or connection error (nothing was sent by this invocation, or it stopped early; see the log) |
+| 2 | Validation, template or connection error (nothing was sent by this invocation, or it stopped early; it prints how far it got, and the log has the details) |
 | 130 | Interrupted with Ctrl-C (re-run with `--resume`) |
 
 ## Recipes

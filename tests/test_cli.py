@@ -193,3 +193,14 @@ def test_starttls_not_offered_explains_and_closes_the_connection(files, fake_smt
     err = capsys.readouterr().err
     assert "relay.example.org:587 does not offer STARTTLS" in err and "--security none" in err
     assert fake_smtp.instances[0].closed
+
+
+def test_a_stop_mid_run_prints_what_was_done(files, fake_smtp, capsys):
+    (files / "people.csv").write_text(
+        "email,first_name\nann@example.org,Ann\nbo@example.org,Bo\ncy@example.org,Cy\n", encoding="utf-8"
+    )
+    fake_smtp.failures = [None, smtplib.SMTPSenderRefused(550, b"5.4.5 Daily user sending limit exceeded", "t")]
+    assert main(_send_args(files, "--log", str(files / "sent.jsonl"))) == 2
+    err = capsys.readouterr().err
+    assert "Stopped after 2 of 3 recipient(s): sent: 1, failed: 1." in err
+    assert err.index("Stopped after") < err.index("Re-run with --resume")

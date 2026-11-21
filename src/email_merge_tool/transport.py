@@ -14,9 +14,12 @@ from email.errors import MessageError
 from email.message import EmailMessage, Message
 from email.utils import getaddresses
 from pathlib import Path
-from typing import Any, Protocol, TextIO
+from typing import TYPE_CHECKING, Any, Protocol, TextIO
 
 from .message import wire_bytes
+
+if TYPE_CHECKING:
+    from .merge import MergeReport
 
 __all__ = [
     "PRESETS",
@@ -28,6 +31,7 @@ __all__ = [
     "UncertainSendError",
     "FatalSendError",
     "AccountRefusedError",
+    "TransportError",
 ]
 
 logger = logging.getLogger(__name__)
@@ -66,7 +70,26 @@ class UncertainSendError(PermanentSendError):
 
 
 class FatalSendError(Exception):
-    """The run cannot continue (e.g. authentication failed)."""
+    """The run cannot continue (e.g. authentication failed).
+
+    Attributes:
+        report: The :class:`~email_merge_tool.MergeReport` of the run up to
+            the stop, when :func:`~email_merge_tool.mail_merge` raised this:
+            who was sent the message, who was not, and the warnings. ``None``
+            when the error comes from calling a transport directly.
+    """
+
+    report: MergeReport | None = None
+
+
+class TransportError(FatalSendError):
+    """The transport raised an exception that is not one of this package's send errors.
+
+    :func:`~email_merge_tool.mail_merge` stops the run with this error, and
+    the original exception is its ``__cause__``. The message being sent is
+    logged ``uncertain``, because the transport may have sent it before it
+    failed.
+    """
 
 
 class AccountRefusedError(FatalSendError):
@@ -267,6 +290,8 @@ def _describe_refused(refused: Mapping[str, object]) -> str:
 
 
 def _reason(error: BaseException) -> str:
+    if isinstance(error, FatalSendError) and error.__cause__ is not None:  # a failed reconnect
+        return f"reconnecting failed: {_reason(error.__cause__)}"
     if isinstance(error, smtplib.SMTPRecipientsRefused):
         return f"recipient refused: {_describe_refused(error.recipients)}"
     if isinstance(error, smtplib.SMTPResponseException):
@@ -276,6 +301,19 @@ def _reason(error: BaseException) -> str:
 
 def _temporary(reply: tuple[int, bytes]) -> bool:
     return 400 <= reply[0] < 500
+
+
+def _temporary_open_failure(error: BaseException | None) -> bool:
+    """Whether connecting may work when tried again: no answer, a dropped connection, or a 4xx reply.
+
+    A 5xx reply, a TLS failure, a refused login and a missing extension are
+    left alone, because trying again meets them again.
+    """
+    if isinstance(error, smtplib.SMTPResponseException):  # a greeting, EHLO or AUTH reply
+        return 400 <= error.smtp_code < 500
+    if isinstance(error, (ssl.SSLError, smtplib.SMTPNotSupportedError)):
+        return False
+    return isinstance(error, OSError)  # refused, timed out, reset, or closed by the server
 
 
 _ENHANCED_STATUS = re.compile(r"\s*([245])\.(\d{1,3})\.(\d{1,3})(?!\d)")
@@ -395,6 +433,11 @@ class SMTPTransport:
     continue with the next person. Authentication failures raise
     :class:`FatalSendError`.
 
+    A connection lost between messages is opened again before the next one.
+    Reconnecting that fails for a reason that may pass (no answer, a dropped
+    connection, a 4xx greeting) counts as one of the ``max_retries``; when
+    they run out, :meth:`send` raises :class:`FatalSendError`.
+
     When the server accepts the message for some recipients and refuses
     others, :meth:`send` returns the refusals. A temporary refusal of a main
     (``To``) recipient is retried for the temporarily refused addresses only,
@@ -477,7 +520,8 @@ class SMTPTransport:
             AccountRefusedError: the reply refuses the account (a quota, a
                 rate limit, a login or the sender address), so the run
                 should stop.
-            FatalSendError: reconnecting failed.
+            FatalSendError: reconnecting failed for good: a login or TLS
+                failure, or ``max_retries`` failed attempts in a row.
         """
         attempt = 0
         self.unconfirmed = False
@@ -541,6 +585,10 @@ class SMTPTransport:
                 error = exc
             except MessageError as exc:  # a header the generator cannot write
                 raise PermanentSendError(f"the message cannot be written: {exc}") from exc
+            except FatalSendError as exc:  # from open(): reconnecting failed
+                if not _temporary_open_failure(exc.__cause__):
+                    raise
+                error = exc
             except BaseException:  # Ctrl-C and the like: let the caller log it if it may have arrived
                 self.unconfirmed = phase is not None and phase.sent
                 if self._smtp is not None:
@@ -564,6 +612,11 @@ class SMTPTransport:
                 error = smtplib.SMTPRecipientsRefused(retry)
             attempt += 1
             if attempt > self.max_retries:
+                if isinstance(error, FatalSendError):  # the server stayed out of reach
+                    raise FatalSendError(
+                        f"lost the connection to {self.config.host}:{self.config.port} and could not "
+                        f"reconnect in {self.max_retries} retries ({_reason(error.__cause__ or error)})"
+                    ) from error
                 reason = f"gave up after {self.max_retries} retries: {_reason(error)}"
                 others = "; the other recipients were sent the message" if delivered else ""
                 code, text = _reply(error, main)

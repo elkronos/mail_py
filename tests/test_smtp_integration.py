@@ -57,6 +57,8 @@ class Handler:
     Each is used in order; ``None`` or an exhausted list accepts. A reply that
     starts with ``421`` closes the connection after it is sent. The DATA reply
     ``"drop"`` keeps the message and closes the connection without replying.
+    ``stop()`` and ``start()`` take the server down and bring it back on the
+    same port, like an outage.
     """
 
     def __init__(self):
@@ -66,6 +68,16 @@ class Handler:
         self.commands: list[tuple[str, str]] = []
         self.delivered: list[Delivery] = []
         self.port = 0
+        self.controller: Controller | None = None
+        self.launch = None  # set by the serve fixture: starts a server for this handler
+
+    def stop(self):
+        if self.controller is not None:
+            self.controller.stop()
+            self.controller = None
+
+    def start(self):
+        self.controller = self.launch()
 
     async def handle_MAIL(self, server, session, envelope, address, mail_options):
         self.commands.append(("MAIL", address))
@@ -126,21 +138,27 @@ def _free_port():
 @pytest.fixture
 def serve():
     """Start an aiosmtpd server; keyword arguments go to aiosmtpd's SMTP class."""
-    controllers = []
+    handlers = []
 
     def start(ssl_context=None, **smtp_options):
         handler = Handler()
         handler.port = _free_port()
-        controller = Controller(
-            handler, hostname="127.0.0.1", port=handler.port, ssl_context=ssl_context, **smtp_options
-        )
-        controller.start()
-        controllers.append(controller)
+
+        def launch():
+            controller = Controller(
+                handler, hostname="127.0.0.1", port=handler.port, ssl_context=ssl_context, **smtp_options
+            )
+            controller.start()
+            return controller
+
+        handler.launch = launch
+        handler.start()
+        handlers.append(handler)
         return handler
 
     yield start
-    for controller in controllers:
-        controller.stop()
+    for handler in handlers:
+        handler.stop()
 
 
 @pytest.fixture
@@ -523,3 +541,48 @@ def test_long_list_unsubscribe_arrives_verbatim(server, people, sleeps):
     assert b"=?" not in delivery.content
     assert delivery.message["List-Unsubscribe"] == value.replace("{id}", "1")
     assert delivery.message["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+
+
+def test_reconnecting_is_retried_and_then_stops_with_the_report(server, people, sleeps, tmp_path):
+    def outage(result):
+        if result.to == "ann@example.org":
+            server.stop()
+
+    with pytest.raises(FatalSendError, match="could not reconnect in 3 retries") as info:
+        send(server, people, tmp_path=tmp_path, progress=outage)
+    assert sleeps == [2.0, 4.0, 8.0]  # the dropped connection, then two failed reconnects
+    assert [(r.to, r.status) for r in info.value.report.results] == [
+        ("ann@example.org", "sent"),
+        ("bo@example.org", "failed"),
+    ]
+    assert info.value.report.summary() == "sent: 1, failed: 1"
+    assert logged(tmp_path) == [("ann@example.org", "sent"), ("bo@example.org", "failed")]
+
+
+def test_a_server_back_within_the_retries_gets_the_rest(server, people, monkeypatch, tmp_path):
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        if len(waits) == 2:  # the server comes back after one failed reconnect
+            server.start()
+
+    monkeypatch.setattr("time.sleep", wait)
+
+    def outage(result):
+        if result.to == "ann@example.org":
+            server.stop()
+
+    report = send(server, people[:3], tmp_path=tmp_path, progress=outage)
+    assert [r.status for r in report.results] == ["sent", "sent", "sent"]
+    assert [d.rcpt_tos for d in server.delivered] == [["ann@example.org"], ["bo@example.org"], ["cy@example.org"]]
+    assert waits == [2.0, 4.0]
+
+
+def test_the_report_comes_with_an_account_refusal(server, people, sleeps):
+    server.mail = [None, "550 5.4.5 Daily user sending limit exceeded."]
+    with pytest.raises(AccountRefusedError) as info:
+        send(server, people)  # no log: the report is the only record
+    report = info.value.report
+    assert [(r.to, r.status) for r in report.results] == [("ann@example.org", "sent"), ("bo@example.org", "failed")]
+    assert any("sending without a log" in issue.message for issue in report.issues)

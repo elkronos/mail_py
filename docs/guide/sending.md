@@ -83,6 +83,12 @@ unencrypted.
   message. Use `--resume` afterwards. The message names the step that failed
   (connecting, TLS or login) and what to try, such as `--security none` for
   a relay without STARTTLS or `--no-auth` for one without a login.
+- A connection lost **mid-run** is opened again for the next attempt. A
+  reconnect that fails for a reason that may pass (no answer, connection
+  refused or reset, a `4xx` greeting) uses up one of the 3 retries, with the
+  same backoff, so an outage of a few seconds doesn't end the run. When the
+  retries run out, or the reconnect fails for good (a refused login, a TLS
+  error), the run stops and the message being sent is logged as `failed`.
 - **Account-level** refusals stop the run at once, because every remaining
   message would meet them too: a daily quota (Gmail's `550 5.4.5`,
   Microsoft's `SubmissionQuotaExceeded`), a `4.7.x` or `5.7.x` reply about a
@@ -136,3 +142,33 @@ print(report.summary())
 
 To deliver another way (an HTTP API, a queue), write a class with `open()`,
 `send(message)` and `close()` methods and pass it as `transport`.
+
+### When a run stops part-way
+
+Every error that stops a run while sending is a `FatalSendError`, and its
+`report` attribute holds the `MergeReport` up to that point: who was sent the
+message, who failed, and the warnings. That holds with or without a log, so a
+script can always say who was mailed:
+
+```python
+from email_merge_tool import FatalSendError
+
+try:
+    report = mail_merge(..., transport=transport, dry_run=False, log_path="invite.jsonl")
+except FatalSendError as exc:
+    print(f"stopped: {exc}")
+    report = exc.report
+print(report.summary())   # e.g. "sent: 212, failed: 1"
+```
+
+If the transport raises an exception that is not one of the send errors (for
+example a `RuntimeError` from an HTTP client), the run stops with
+`TransportError`, a `FatalSendError` whose `__cause__` is the original
+exception. The message being sent is logged `uncertain`, because the transport
+may have sent it before failing.
+
+Sending without `log_path=` works, but adds a warning to `report.issues`:
+without a log, a run that stops part-way cannot be resumed. The command line
+asks for `--log FILE` or an explicit `--no-log`, and when a run stops it
+prints how far it got, such as `Stopped after 214 of 600 recipient(s): sent:
+212, failed: 1, skipped: 1`.

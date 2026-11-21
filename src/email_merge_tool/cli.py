@@ -226,6 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Aborted; nothing was sent.")
             return 1
         interval = 60.0 / args.rate if args.rate and args.rate > 0 else 0.0
+        total = len(preview.results)
         sending = True
         report = mail_merge(
             templates,
@@ -252,6 +253,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except FatalSendError as exc:
         print(f"error: {exc}", file=sys.stderr)
         if sending:
+            if exc.report is not None:
+                done = len(exc.report.results)
+                print(f"Stopped after {done} of {total} recipient(s): {exc.report.summary()}.", file=sys.stderr)
             print(_resume_advice(args), file=sys.stderr)
         return 2
     except (TemplateError, ValueError) as exc:
