@@ -1,5 +1,6 @@
 import json
 import smtplib
+import ssl
 from email import message_from_bytes, policy
 
 import pytest
@@ -59,7 +60,8 @@ def test_real_send_over_ssl_with_login(people, fake_smtp, tmp_path):
     report = mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=gmail(), log_path=log)
     assert report.sent == 4
     (conn,) = fake_smtp.instances
-    assert (conn.host, conn.port, conn.tls) == ("smtp.gmail.com", 465, True)
+    assert (conn.host, conn.port, conn.implicit_tls) == ("smtp.gmail.com", 465, True)
+    assert conn.context.verify_mode == ssl.CERT_REQUIRED and conn.context.check_hostname
     assert conn.logged_in == ("team@example.org", "app-pass")
     assert [m["To"] for m in conn.sent] == [p["email"] for p in people]
     assert conn.closed
@@ -72,7 +74,8 @@ def test_outlook_uses_starttls_on_587(fake_smtp, people):
     t = SMTPTransport(SMTPConfig.from_service("outlook", "me@outlook.com", "pw"))
     mail_merge(TPL, people[:1], sender="me@outlook.com", dry_run=False, transport=t)
     conn = fake_smtp.instances[0]
-    assert (conn.host, conn.port, conn.tls) == ("smtp-mail.outlook.com", 587, True)
+    assert (conn.host, conn.port, conn.implicit_tls, conn.tls) == ("smtp-mail.outlook.com", 587, False, True)
+    assert conn.context.verify_mode == ssl.CERT_REQUIRED and conn.context.check_hostname
 
 
 def test_resume_never_double_sends(people, fake_smtp, tmp_path):
@@ -107,6 +110,7 @@ def test_transient_error_is_retried_then_permanent_fails_one(people, fake_smtp, 
     assert [r.status for r in report.results] == ["sent", "failed", "sent", "sent"]
     assert "550" in report.results[1].detail
     assert len(fake_smtp.instances) == 2  # reconnected once
+    assert fake_smtp.sleeps == [2.0]  # one backoff, before the retry
 
 
 def test_auth_failure_is_fatal_and_clear(people, fake_smtp):

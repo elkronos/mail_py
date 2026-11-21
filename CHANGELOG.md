@@ -18,6 +18,7 @@
 - `Issue` has an optional `where` label. The CLI preview shows the send log's full path, and `--resume` needs `--log`.
 - Messages logged `uncertain` count toward `limit`. Exclusion lists may be UTF-16 text files, and missing values in a list are skipped.
 - `Cc`, `Bcc`, `Reply-To` and `From` values follow the same address rules as recipients, and every header is checked to be writable before sending, so a bad header fails validation instead of stopping a run partway. `SMTPTransport(data_timeout=None)` waits without a limit.
+- The tests send through a local SMTP server (aiosmtpd), including STARTTLS and implicit TLS with a test certificate authority. The `dev` extra installs aiosmtpd, hypothesis and trustme.
 
 ## 0.2.0
 

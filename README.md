@@ -93,7 +93,7 @@ an HTML newsletter with unsubscribe headers, and a complete survey experiment
 
 ```bash
 pip install -e ".[dev,docs]"
-pytest               # tests
+pytest               # tests, including a local SMTP server (aiosmtpd) and TLS (trustme)
 ruff check . && ruff format --check .
 mkdocs serve         # documentation at http://127.0.0.1:8000
 ```

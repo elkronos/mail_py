@@ -8,7 +8,12 @@ collect_ignore = ["test_merge.py"]
 
 
 class FakeSMTP:
-    """Stands in for smtplib.SMTP / SMTP_SSL and records what was sent."""
+    """Stands in for smtplib.SMTP and records what was sent.
+
+    The constructor has smtplib.SMTP's signature, which takes no TLS context.
+    ``features`` names the extensions the fake server offers; ``starttls()``
+    and ``login()`` fail as smtplib's do when theirs is missing.
+    """
 
     instances: list["FakeSMTP"] = []
     # Scripted outcomes of successive send_message calls: None succeeds, an
@@ -17,20 +22,28 @@ class FakeSMTP:
     # and then raises exc, as when the server's final reply is lost.
     failures: list = []
     login_error: Exception | None = None
+    features: set[str] = set()
+    sleeps: list[float] = []
 
-    def __init__(self, host, port, timeout=None, context=None):
-        self.host, self.port, self.context = host, port, context
+    def __init__(self, host="", port=0, local_hostname=None, timeout=30.0, source_address=None):
+        self.host, self.port, self.timeout = host, port, timeout
+        self.context = None
+        self.implicit_tls = False
         self.sent = []
         self.logged_in = None
-        self.tls = context is not None
+        self.tls = False
         self.closed = False
         self.payload_error = None
         FakeSMTP.instances.append(self)
 
     def starttls(self, context=None):
-        self.tls = True
+        if "starttls" not in FakeSMTP.features:
+            raise smtplib.SMTPNotSupportedError("STARTTLS extension not supported by server.")
+        self.tls, self.context = True, context
 
     def login(self, user, password):
+        if "auth" not in FakeSMTP.features:
+            raise smtplib.SMTPNotSupportedError("SMTP AUTH extension not supported by server.")
         if FakeSMTP.login_error:
             raise FakeSMTP.login_error
         self.logged_in = (user, password)
@@ -72,6 +85,14 @@ class FakeSMTP:
         self.closed = True
 
 
+class FakeSMTPSSL(FakeSMTP):
+    """Stands in for smtplib.SMTP_SSL, whose constructor takes the TLS context."""
+
+    def __init__(self, host="", port=0, local_hostname=None, *, timeout=30.0, source_address=None, context=None):
+        super().__init__(host, port, local_hostname, timeout, source_address)
+        self.context, self.implicit_tls, self.tls = context, True, True
+
+
 @pytest.fixture(autouse=True)
 def no_hostname_lookup(monkeypatch):
     # smtplib names the local host for EHLO with socket.getfqdn(), a DNS
@@ -85,9 +106,11 @@ def fake_smtp(monkeypatch):
     FakeSMTP.instances = []
     FakeSMTP.failures = []
     FakeSMTP.login_error = None
+    FakeSMTP.features = {"starttls", "auth", "8bitmime", "size"}
+    FakeSMTP.sleeps = []  # the delays the code under test asked for, in seconds
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
-    monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTP)
-    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTPSSL)
+    monkeypatch.setattr("time.sleep", FakeSMTP.sleeps.append)
     return FakeSMTP
 
 

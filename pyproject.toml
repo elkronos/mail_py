@@ -23,7 +23,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-cov", "ruff"]
+dev = ["pytest>=7", "pytest-cov", "ruff", "aiosmtpd>=1.4", "hypothesis>=6", "trustme>=1.0"]
 docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9,<10", "mkdocstrings[python]>=0.24"]
 
 [project.scripts]
