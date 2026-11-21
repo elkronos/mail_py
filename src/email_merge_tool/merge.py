@@ -24,7 +24,14 @@ from .experiment import Assignment, assign_variants, write_assignments
 from .message import build_message, wire_bytes
 from .sendlog import SendLog, sent_addresses
 from .templates import Template, TemplateError, fill, load_template, placeholders
-from .transport import DryRunTransport, FatalSendError, PermanentSendError, Transport, UncertainSendError
+from .transport import (
+    DryRunTransport,
+    FatalSendError,
+    PermanentSendError,
+    Transport,
+    UncertainSendError,
+    _describe_refused,
+)
 
 __all__ = ["mail_merge", "MergeReport", "Result"]
 
@@ -440,7 +447,14 @@ def _deliver(transport: Transport, message: EmailMessage, to: str, variant: str 
         return Result(to, "failed", variant, message_id, str(exc))
     except FatalSendError:
         raise
-    detail = f"some recipients refused: {refused}" if refused else ""
+    refused = refused if isinstance(refused, Mapping) else {}
+    key = normalize_address(to)
+    mine = {address: reply for address, reply in refused.items() if normalize_address(address) == key}
+    if mine:  # a Cc or Bcc took it, but the person this row is for did not
+        detail = f"recipient refused: {_describe_refused(mine)}; the other recipients were sent the message"
+        logger.warning("failed to send to %s: %s", to, detail)
+        return Result(to, "failed", variant, message_id, detail)
+    detail = f"some recipients refused: {_describe_refused(refused)}" if refused else ""
     return Result(to, "dry_run" if dry_run else "sent", variant, message_id, detail)
 
 

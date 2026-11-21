@@ -25,6 +25,7 @@ from email_merge_tool import (  # noqa: E402
     Template,
     mail_merge,
     read_log,
+    sent_addresses,
 )
 
 TPL = Template(subject="Hello {first_name}", text="Dear {first_name},\nWelcome.\n")
@@ -311,3 +312,73 @@ def test_8bit_text_is_declared_or_encoded_for_7bit_servers(serve, sleeps):
     (delivery,) = seven.delivered
     assert delivery.content.isascii() and not any(o.startswith("BODY") for o in delivery.mail_options)
     assert delivery.message.get_content().splitlines() == ["Dear Zoë,", "Welcome."]
+
+
+ARCHIVED = Template(subject="Hello {first_name}", text="Dear {first_name}", headers={"Cc": "archive@example.org"})
+
+
+def test_refused_to_with_an_accepted_cc_is_failed_and_resumable(server, people, sleeps, tmp_path):
+    server.rcpt["ann@example.org"] = ["550 5.1.1 No such user"]
+    report = send(server, people[:2], template=ARCHIVED, tmp_path=tmp_path)
+    assert [r.status for r in report.results] == ["failed", "sent"]
+    assert report.failed == 1
+    assert "ann@example.org (550 5.1.1 No such user)" in report.results[0].detail
+    assert [d.rcpt_tos for d in server.delivered] == [
+        ["archive@example.org"],
+        ["bo@example.org", "archive@example.org"],
+    ]
+    assert sent_addresses(tmp_path / "log.jsonl") == {"bo@example.org"}
+
+    again = send(server, people[:2], template=ARCHIVED, tmp_path=tmp_path, resume=True)
+    assert [r.status for r in again.results] == ["sent", "skipped"]
+    assert len(server.received_by("ann@example.org")) == 1
+
+
+def test_temporary_refusal_of_to_is_retried_for_that_address_only(server, people, sleeps, tmp_path):
+    server.rcpt["ann@example.org"] = ["451 4.7.1 Greylisted, try again"]
+    report = send(server, people[:1], template=ARCHIVED, tmp_path=tmp_path)
+    assert [r.status for r in report.results] == ["sent"]
+    assert [d.rcpt_tos for d in server.delivered] == [["archive@example.org"], ["ann@example.org"]]
+    assert sleeps == [2.0]
+
+
+def test_refused_cc_alone_still_counts_as_sent(server, people, sleeps, tmp_path):
+    server.rcpt["archive@example.org"] = ["550 5.1.1 No such user"]
+    report = send(server, people[:1], template=ARCHIVED, tmp_path=tmp_path)
+    assert [r.status for r in report.results] == ["sent"]
+    assert report.results[0].detail == "some recipients refused: archive@example.org (550 5.1.1 No such user)"
+    assert [d.rcpt_tos for d in server.delivered] == [["ann@example.org"]]
+
+
+def test_rcpt_4xx_is_retried(server, people, sleeps, tmp_path):
+    server.rcpt["ann@example.org"] = ["451 4.7.1 Greylisted, try again", "452 4.5.3 Too many recipients"]
+    report = send(server, people[:2], tmp_path=tmp_path)
+    assert [r.status for r in report.results] == ["sent", "sent"]
+    assert server.commands.count(("RCPT", "ann@example.org")) == 3
+    assert sleeps == [2.0, 4.0]
+
+
+def test_rcpt_421_reconnects_and_retries(server, people, sleeps, tmp_path):
+    server.rcpt["ann@example.org"] = ["421 4.3.2 Shutting down"]
+    report = send(server, people[:2], tmp_path=tmp_path)
+    assert [r.status for r in report.results] == ["sent", "sent"]
+    assert sleeps == [2.0]  # one backoff for ann; bo needs none
+
+
+def test_rcpt_4xx_that_persists_fails_after_the_retries(server, people, sleeps, tmp_path):
+    server.rcpt["ann@example.org"] = ["450 4.2.1 Mailbox busy"] * 4
+    report = send(server, people[:2], tmp_path=tmp_path)
+    assert [r.status for r in report.results] == ["failed", "sent"]
+    assert (
+        report.results[0].detail
+        == "gave up after 3 retries: recipient refused: ann@example.org (450 4.2.1 Mailbox busy)"
+    )
+    assert sleeps == [2.0, 4.0, 8.0]
+
+
+def test_rcpt_5xx_fails_at_once(server, people, sleeps, tmp_path):
+    server.rcpt["ann@example.org"] = ["550 5.1.1 No such user"]
+    report = send(server, people[:2], tmp_path=tmp_path)
+    assert [r.status for r in report.results] == ["failed", "sent"]
+    assert report.results[0].detail == "recipient refused: ann@example.org (550 5.1.1 No such user)"
+    assert server.commands.count(("RCPT", "ann@example.org")) == 1 and sleeps == []

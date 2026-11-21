@@ -83,7 +83,7 @@ printing one line per recipient:
 ```text
     sent  ann.lee@example.org
     sent  bo.chen@example.org
-  failed  carmen.diaz@example.org (550 b'5.1.1 mailbox unavailable')
+  failed  carmen.diaz@example.org (recipient refused: carmen.diaz@example.org (550 5.1.1 mailbox unavailable))
 
 Done: sent: 2, failed: 1.
 ```

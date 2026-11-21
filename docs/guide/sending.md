@@ -62,7 +62,8 @@ deliverability and higher limits. All of them offer SMTP, so use `--host`,
 - The CLI sends at most **20 messages per minute** by default (`--rate`). In
   Python, set `min_interval=` in seconds. Sending bursts is a common trigger
   for provider throttling.
-- **Temporary** failures (4xx replies, dropped connections, timeouts) are
+- **Temporary** failures (4xx replies, including a 4xx refusal of a recipient
+  such as greylisting, dropped connections, timeouts) are
   retried up to 3 times with exponential backoff (2 s, 4 s, 8 s), reconnecting
   as needed, but only until the whole message has been written to the
   server. If the connection drops after that, or the reply is cut short or
@@ -75,8 +76,13 @@ deliverability and higher limits. All of them offer SMTP, so use `--host`,
   the run continues.
 - **Fatal** failures (can't connect, login rejected) stop the run with a clear
   message. Use `--resume` afterwards.
-- If the server accepts a message for the main recipient but refuses a `Cc`,
-  the message counts as `sent`, with the refusal noted in `detail`.
+- If the server accepts a message for the main recipient but refuses a `Cc`
+  or `Bcc`, the message counts as `sent`, with the refusal noted in `detail`.
+- If the server refuses the main (`To`) recipient, the row is `failed`, even
+  when it accepted a `Cc` or `Bcc`. Those recipients were sent the message,
+  and `--resume` sends it again to everyone on the row, so they get a second
+  copy. A temporary (4xx) refusal of the main recipient is retried for the
+  refused addresses only.
 
 ## What the server receives
 

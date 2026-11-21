@@ -513,3 +513,28 @@ def test_empty_exclusion_list_warns(people, tmp_path):
     empty.write_text("# nobody yet\n", encoding="utf-8")
     report = mail_merge(TPL, people, sender=SENDER, exclude=empty)
     assert any("holds no addresses" in str(i) for i in report.issues)
+
+
+def test_a_transport_that_refuses_the_to_address_fails_the_row(people, tmp_path):
+    class PartlyRefusing:
+        def open(self):
+            pass
+
+        def send(self, message):
+            if message["To"] == "bo@example.org":
+                return {"Bo@Example.org": (550, b"5.1.1 no such user"), "x@example.org": (550, b"no")}
+            return {"lee@example.org": (550, b"5.1.1 no such user")}
+
+        def close(self):
+            pass
+
+    log = tmp_path / "log.jsonl"
+    report = mail_merge(TPL, people[:2], sender=SENDER, dry_run=False, transport=PartlyRefusing(), log_path=log)
+    assert [(r.status, r.detail) for r in report.results] == [
+        ("sent", "some recipients refused: lee@example.org (550 5.1.1 no such user)"),
+        (
+            "failed",
+            "recipient refused: Bo@Example.org (550 5.1.1 no such user); the other recipients were sent the message",
+        ),
+    ]
+    assert sent_addresses(log) == {"ann@example.org"}

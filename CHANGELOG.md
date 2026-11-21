@@ -12,6 +12,8 @@
 - Long `List-Unsubscribe` values, such as links with a token, are written as given instead of RFC 2047-encoded, which no mail client could use. The header folds only between URIs. A value that is not ASCII URIs in angle brackets fails validation for its row.
 - Validation writes out every message exactly as it will be sent. A header that Python 3.10 to 3.12 fold into a line break without the following space, which ended the header block early on 3.10 and stopped a send partway on 3.11 and 3.12, now fails validation for its row.
 - Dry-run `.eml` files are the bytes that go over SMTP, with CRLF line endings, and are UTF-8 when an address needs SMTPUTF8. Such an address used to stop the dry run with `UnicodeEncodeError`.
+- A row whose `To` address the server refuses is logged as `failed`, and resume retries it, even when a `Cc` or `Bcc` on the row was accepted. It used to be logged as `sent`, so resume skipped that person for good. A temporary refusal of the `To` address is retried for the refused addresses only, so the others do not get a second copy.
+- Temporary (4xx) refusals of a recipient, such as greylisting, are retried with backoff like other temporary failures, as the documentation said. They used to fail at once. After a 421 at that stage the next message no longer waits through a backoff.
 
 ### Changed
 - `email-merge --send` requires `--log FILE`, or `--no-log` to send without one.
@@ -22,6 +24,7 @@
 - `Issue` has an optional `where` label. The CLI preview shows the send log's full path, and `--resume` needs `--log`.
 - Messages logged `uncertain` count toward `limit`. Exclusion lists may be UTF-16 text files, and missing values in a list are skipped.
 - `Cc`, `Bcc`, `Reply-To` and `From` values follow the same address rules as recipients, and every header is checked to be writable before sending, so a bad header fails validation instead of stopping a run partway. `SMTPTransport(data_timeout=None)` waits without a limit.
+- SMTP replies in `detail` read `ann@example.org (550 5.1.1 No such user)` instead of a Python dict of byte strings.
 - The tests send through a local SMTP server (aiosmtpd), including STARTTLS and implicit TLS with a test certificate authority. The `dev` extra installs aiosmtpd, hypothesis and trustme.
 
 ## 0.2.0

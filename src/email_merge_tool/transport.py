@@ -6,6 +6,7 @@ import logging
 import smtplib
 import ssl
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from email.errors import MessageError
 from email.message import EmailMessage, Message
@@ -164,12 +165,14 @@ class _DataPhase:
         vars(self._smtp).pop("send", None)
 
 
-def _envelope(message: Message) -> tuple[str, list[str]]:
+def _envelope(message: Message) -> tuple[str, list[str], set[str]]:
     """The envelope sender and recipients, chosen as ``smtplib``'s ``send_message`` does.
 
     The sender is the ``Sender`` address, or else the ``From`` address. The
     recipients are every address in ``To``, ``Bcc`` and ``Cc``. A message with
-    one block of ``Resent-`` headers uses those instead.
+    one block of ``Resent-`` headers uses those instead. The third item holds
+    the main recipients: the ``To`` addresses, or every recipient if there
+    are none.
     """
     resent = message.get_all("Resent-Date")
     if resent is None:
@@ -180,7 +183,10 @@ def _envelope(message: Message) -> tuple[str, list[str]]:
         raise ValueError("message has more than one 'Resent-' header block")
     sender = message[prefix + "Sender"] if prefix + "Sender" in message else message[prefix + "From"]
     fields = [message[prefix + name] for name in ("To", "Bcc", "Cc") if message[prefix + name] is not None]
-    return getaddresses([sender])[0][1], [address for _, address in getaddresses(fields)]
+    recipients = [address for _, address in getaddresses(fields)]
+    to = message[prefix + "To"]
+    main = {address for _, address in getaddresses([to])} & set(recipients) if to is not None else set()
+    return getaddresses([sender])[0][1], recipients, main or set(recipients)
 
 
 def _flatten(message: Message, *, utf8: bool = False, eight_bit: bool = True) -> bytes:
@@ -212,16 +218,48 @@ def _wire(smtp: smtplib.SMTP, message: Message, sender: str, recipients: list[st
     return _flatten(message, eight_bit=False), []
 
 
+def _text(reply: bytes | str) -> str:
+    return reply.decode("utf-8", "replace") if isinstance(reply, bytes) else str(reply)
+
+
+def _describe_refused(refused: Mapping[str, object]) -> str:
+    """``{"a@x.org": (550, b"5.1.1 no such user")}`` as ``a@x.org (550 5.1.1 no such user)``."""
+    parts = []
+    for address, reply in refused.items():
+        if isinstance(reply, tuple) and len(reply) == 2:
+            reply = f"{reply[0]} {_text(reply[1])}"
+        parts.append(f"{address} ({reply})")
+    return ", ".join(parts)
+
+
+def _reason(error: BaseException) -> str:
+    if isinstance(error, smtplib.SMTPRecipientsRefused):
+        return f"recipient refused: {_describe_refused(error.recipients)}"
+    if isinstance(error, smtplib.SMTPResponseException):
+        return f"{error.smtp_code} {_text(error.smtp_error)}"
+    return str(error) or type(error).__name__
+
+
+def _temporary(reply: tuple[int, bytes]) -> bool:
+    return 400 <= reply[0] < 500
+
+
 class SMTPTransport:
     """Deliver over SMTP with TLS, automatic reconnection, and retries.
 
-    Temporary failures (SMTP 4xx replies, dropped connections) are retried up
-    to ``max_retries`` times with exponential backoff, but only until the
-    message data has been sent. A connection lost after that raises
-    :class:`UncertainSendError` instead, because the server may already have
-    the message. Permanent 5xx replies for a recipient raise
-    :class:`PermanentSendError` so the run can continue with the next person.
-    Authentication failures raise :class:`FatalSendError`.
+    Temporary failures (SMTP 4xx replies, including a 4xx refusal of a
+    recipient, and dropped connections) are retried up to ``max_retries``
+    times with exponential backoff, but only until the message data has been
+    sent. A connection lost after that raises :class:`UncertainSendError`
+    instead, because the server may already have the message. Permanent 5xx
+    replies for a recipient raise :class:`PermanentSendError` so the run can
+    continue with the next person. Authentication failures raise
+    :class:`FatalSendError`.
+
+    When the server accepts the message for some recipients and refuses
+    others, :meth:`send` returns the refusals. A temporary refusal of a main
+    (``To``) recipient is retried for the temporarily refused addresses only,
+    so the others do not get a second copy.
 
     Args:
         config: Server settings.
@@ -278,7 +316,9 @@ class SMTPTransport:
 
         Returns:
             Recipients the server refused while accepting the message for the
-            others (e.g. a bad Cc). The message *was* sent when this returns.
+            others, as ``{address: (code, reply)}``. The message *was* sent
+            when this returns, but not to these addresses, which may include
+            the ``To`` address when a ``Cc`` or ``Bcc`` was accepted.
 
         Raises:
             PermanentSendError: the server rejected the message, or temporary
@@ -288,7 +328,9 @@ class SMTPTransport:
         """
         attempt = 0
         self.unconfirmed = False
-        sender, recipients = _envelope(message)
+        sender, pending, main = _envelope(message)
+        refused: dict[str, tuple[int, bytes]] = {}  # for good, while others were sent the message
+        delivered = False  # the server has taken the message for at least one recipient
         while True:
             phase: _DataPhase | None = None
             try:
@@ -296,24 +338,42 @@ class SMTPTransport:
                     self.open()
                 smtp = self._smtp
                 assert smtp is not None
-                payload, options = _wire(smtp, message, sender, recipients)
+                payload, options = _wire(smtp, message, sender, pending)
                 phase = _DataPhase(smtp, self.data_timeout)
                 with phase:
-                    return smtp.sendmail(sender, recipients, payload, options)
-            except smtplib.SMTPRecipientsRefused as exc:
-                raise PermanentSendError(f"recipient refused: {exc.recipients}") from exc
+                    result = smtp.sendmail(sender, pending, payload, options)
+                delivered = True
+                retry = {address: reply for address, reply in result.items() if _temporary(reply)}
+                if not retry.keys() & main:
+                    refused.update(result)
+                    return refused
+                refused.update({address: reply for address, reply in result.items() if address not in retry})
+                pending = list(retry)  # the others have it now
+                error: Exception = smtplib.SMTPRecipientsRefused(retry)
+            except smtplib.SMTPRecipientsRefused as exc:  # nobody was sent the message this time
+                if any(code == 421 for code, _ in exc.recipients.values()):
+                    self.close()  # smtplib has already dropped the connection
+                permanent = {address: reply for address, reply in exc.recipients.items() if not _temporary(reply)}
+                if permanent.keys() & main or len(permanent) == len(exc.recipients):
+                    if delivered:  # a retry for the main recipient, after the others were sent it
+                        refused.update(exc.recipients)
+                        return refused
+                    raise PermanentSendError(_reason(exc)) from exc
+                refused.update(permanent)
+                pending = [address for address in pending if address not in permanent]
+                error = exc
             except smtplib.SMTPResponseException as exc:
                 if 500 <= exc.smtp_code < 600:
-                    raise PermanentSendError(f"{exc.smtp_code} {exc.smtp_error!r}") from exc
+                    raise PermanentSendError(_reason(exc)) from exc
                 self.close()  # e.g. 421: the server is closing the connection
                 if phase is not None and phase.sent and not 400 <= exc.smtp_code < 500:
                     # Only a 4xx reply says the server did not take the message. A
                     # reply cut short, garbled or otherwise unexpected says nothing.
                     raise UncertainSendError(
-                        f"unclear reply after the message was sent ({exc.smtp_code} {exc.smtp_error!r}); "
+                        f"unclear reply after the message was sent ({_reason(exc)}); "
                         "the server may have accepted it, so it was not sent again"
                     ) from exc
-                error: Exception = exc
+                error = exc
             except smtplib.SMTPNotSupportedError as exc:  # e.g. SMTPUTF8 needed but not offered
                 raise PermanentSendError(str(exc)) from exc
             except OSError as exc:  # dropped connection, timeout, TLS failure (smtplib errors are OSErrors too)
@@ -337,11 +397,11 @@ class SMTPTransport:
                 raise
             attempt += 1
             if attempt > self.max_retries:
-                raise PermanentSendError(
-                    f"gave up after {self.max_retries} retries: {str(error) or type(error).__name__}"
-                ) from error
+                reason = f"gave up after {self.max_retries} retries: {_reason(error)}"
+                others = "; the other recipients were sent the message" if delivered else ""
+                raise PermanentSendError(reason + others) from error
             delay = self.backoff**attempt
-            logger.warning("temporary failure (%s); retrying in %.0fs", str(error) or type(error).__name__, delay)
+            logger.warning("temporary failure (%s); retrying in %.0fs", _reason(error), delay)
             time.sleep(delay)
 
     def __enter__(self) -> SMTPTransport:
