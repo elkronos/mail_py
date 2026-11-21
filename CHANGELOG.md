@@ -10,6 +10,8 @@
 - A connection lost, or a reply cut short or garbled, after the whole message was written is no longer retried, since the server may already have the message. The row is logged as `uncertain` and resume skips it; Ctrl-C while waiting for that reply logs it the same way. Failures before the message is fully written are still retried. The reply to the message content is awaited for up to 10 minutes (RFC 5321).
 - Body lines that start with `From ` reach recipients unchanged. smtplib sent them as `>From `, which the `.eml` preview did not show. The tool now flattens each message itself, removing `Bcc` and choosing the envelope as before. Non-ASCII text is declared with `BODY=8BITMIME`, or encoded as base64 for a server that does not offer 8BITMIME.
 
+- Long `List-Unsubscribe` values, such as links with a token, are written as given instead of RFC 2047-encoded, which no mail client could use. The header folds only between URIs. A value that is not ASCII URIs in angle brackets fails validation for its row.
+
 ### Changed
 - `email-merge --send` requires `--log FILE`, or `--no-log` to send without one.
 - New result and log status `uncertain`, new exception `UncertainSendError`, and `MergeReport.uncertain`. The CLI exits with 1 when any message is uncertain.

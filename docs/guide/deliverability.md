@@ -16,6 +16,14 @@ decided outside this tool, but the tool does its part and makes the rest easy.
 | One message per recipient, with no exposed recipient list | Privacy, and no "reply all" storms | — |
 | Duplicate detection and exclusion lists | Repeated or unwanted mail drives spam complaints | — |
 
+The `List-Unsubscribe` value is one or more ASCII URIs in angle brackets,
+separated by commas, such as
+`<https://example.org/u?id={id}>, <mailto:unsub@example.org>`. It is written
+exactly as given and folded only between URIs, so a long tokenized link reaches
+mail clients intact. Percent-encode any non-ASCII characters in the URI. A value
+without angle brackets, with spaces inside a URI, with non-ASCII characters, or
+longer than 980 characters fails validation for its row.
+
 ## What you must set up (outside this tool)
 
 1. **SPF, DKIM and DMARC** for your sending domain (RFC 7208, RFC 6376,

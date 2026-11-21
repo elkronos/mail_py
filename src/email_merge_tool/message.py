@@ -3,14 +3,88 @@
 from __future__ import annotations
 
 import mimetypes
+import re
 from collections.abc import Sequence
+from email.headerregistry import BaseHeader, HeaderRegistry
 from email.message import EmailMessage
+from email.policy import Policy
 from email.utils import formatdate, make_msgid, parseaddr
 from pathlib import Path
 
 from .templates import RenderedMessage
 
 __all__ = ["build_message"]
+
+# RFC 5322 section 2.1.1: a header line, name included, may not exceed 998 characters.
+_MAX_LINE = 998
+
+# One RFC 2369 URI in angle brackets: printable ASCII other than < and >.
+_UNSUBSCRIBE_URI = re.compile(r"\s*(<[!-;=?-~]+>)\s*(?:,|$)")
+
+
+class _Verbatim:
+    """Mixin for a header written exactly as given, folded only between its tokens.
+
+    The email package RFC 2047-encodes an unstructured value whose words do
+    not fit on a line, so a long List-Unsubscribe URL would reach mail clients
+    as ``=?utf-8?q?...?=``, which none of them can use. Headers built with
+    this mixin are ASCII, written as given, and folded only at the spaces
+    between tokens, so unfolding restores the value.
+    """
+
+    name: str
+    _tokens: tuple[str, ...]
+
+    def fold(self, *, policy: Policy) -> str:
+        limit = policy.max_line_length or _MAX_LINE
+        lines = [f"{self.name}: {self._tokens[0]}"]
+        for token in self._tokens[1:]:
+            if len(lines[-1]) + 1 + len(token) <= limit:
+                lines[-1] += " " + token
+            else:
+                lines.append(" " + token)
+        return policy.linesep.join(lines) + policy.linesep
+
+
+_REGISTRY = HeaderRegistry()
+_VERBATIM_CLASSES: dict[str, type[BaseHeader]] = {}
+
+
+def _verbatim_header(name: str, tokens: Sequence[str]) -> BaseHeader:
+    """A header object for ``name`` whose value is ``tokens`` joined by spaces."""
+    value = " ".join(tokens)
+    if not value.isascii() or len(name) + 2 + len(value) > _MAX_LINE:
+        raise ValueError(f"{name} must be ASCII and at most {_MAX_LINE - len(name) - 2} characters long")
+    cls = _VERBATIM_CLASSES.get(name.lower())
+    if cls is None:
+        # The registry's class derives from the stdlib header class and
+        # BaseHeader; listing those bases directly keeps the header picklable.
+        bases = _REGISTRY[name].__bases__
+        cls = _VERBATIM_CLASSES[name.lower()] = type(f"_Verbatim{bases[0].__name__}", (_Verbatim, *bases), {})
+    header = cls(name, value)
+    header._tokens = tuple(tokens)  # type: ignore[attr-defined]
+    return header
+
+
+def _unsubscribe_uris(value: str) -> list[str]:
+    """Split a List-Unsubscribe value into its ``<URI>`` parts, or raise ValueError."""
+    if "\r" in value or "\n" in value:
+        raise ValueError("List-Unsubscribe value contains a line break")
+    if not value.isascii():
+        raise ValueError(f"List-Unsubscribe must be ASCII; percent-encode other characters in the URI: {value!r}")
+    uris: list[str] = []
+    position = 0
+    while position < len(value):
+        match = _UNSUBSCRIBE_URI.match(value, position)
+        if match is None:
+            raise ValueError(
+                f"List-Unsubscribe must be one or more <URI> separated by commas, without spaces: {value!r}"
+            )
+        uris.append(match.group(1))
+        position = match.end()
+    if not uris:
+        raise ValueError("List-Unsubscribe is empty")
+    return uris
 
 
 def build_message(
@@ -33,7 +107,10 @@ def build_message(
         sender: From address, e.g. ``"Study Team <team@example.org>"``. A
             ``From`` header in the template overrides it.
         list_unsubscribe: Already-rendered value for the ``List-Unsubscribe``
-            header (RFC 2369), e.g. ``"<https://example.org/u?id=42>"``.
+            header (RFC 2369), e.g. ``"<https://example.org/u?id=42>"``: one
+            or more ASCII URIs in angle brackets, separated by commas. It is
+            written as given (never RFC 2047-encoded), folded only between
+            URIs, and may be up to 980 characters long.
         one_click_unsubscribe: Also add ``List-Unsubscribe-Post:
             List-Unsubscribe=One-Click`` (RFC 8058). Only valid when
             ``list_unsubscribe`` contains an ``https:`` URI, and it only works
@@ -53,13 +130,12 @@ def build_message(
     domain = parseaddr(from_value)[1].rpartition("@")[2] or None
     msg["Message-ID"] = make_msgid(domain=domain)
     if list_unsubscribe:
-        if "\r" in list_unsubscribe or "\n" in list_unsubscribe:
-            raise ValueError("List-Unsubscribe value contains a line break")
-        msg["List-Unsubscribe"] = list_unsubscribe
+        uris = _unsubscribe_uris(list_unsubscribe)
+        msg["List-Unsubscribe"] = _verbatim_header("List-Unsubscribe", [u + "," for u in uris[:-1]] + uris[-1:])
         if one_click_unsubscribe:
-            if "<https:" not in list_unsubscribe.replace(" ", "").lower():
+            if not any(u.lower().startswith("<https:") for u in uris):
                 raise ValueError("one-click unsubscribe (RFC 8058) requires an <https://...> List-Unsubscribe URI")
-            msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+            msg["List-Unsubscribe-Post"] = _verbatim_header("List-Unsubscribe-Post", ["List-Unsubscribe=One-Click"])
     elif one_click_unsubscribe:
         raise ValueError("one_click_unsubscribe requires list_unsubscribe")
     msg.set_content(rendered.text)

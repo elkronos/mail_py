@@ -19,7 +19,7 @@ Without `--send`, the command validates everything, prints the first message
 | `-d, --data FILE` | Recipients, `.csv` or `.json`. |
 | `--to-field COLUMN` | Address column (default `email`). |
 | `--from ADDRESS` | Sender, e.g. `"Lab <lab@example.org>"`. Not needed if the template has `From:`. |
-| `--list-unsubscribe VALUE` | `List-Unsubscribe` header. Placeholders are allowed. |
+| `--list-unsubscribe VALUE` | `List-Unsubscribe` header: one or more `<URI>` values separated by commas. Placeholders are allowed. |
 | `--one-click` | Add the RFC 8058 `List-Unsubscribe-Post` header (needs an `https` URI). |
 | `--attach FILE` | Attach a file to every message. Repeatable. |
 | `--attachment-field COLUMN` | Column with per-recipient file path(s), `;`-separated. Placeholders are allowed. |
