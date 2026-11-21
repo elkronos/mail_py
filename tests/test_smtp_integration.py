@@ -496,3 +496,13 @@ def test_unknown_addresses_do_not_count_and_a_sent_message_resets(server, sleeps
     server.data = ["554 5.7.1 Message rejected", None, "554 5.7.1 Message rejected", None]
     report = send(server, rows(7), max_consecutive_failures=2)
     assert [r.status for r in report.results] == ["failed"] * 4 + ["sent", "failed", "sent"]
+
+
+def test_long_list_unsubscribe_arrives_verbatim(server, people, sleeps):
+    url = "https://example.org/unsubscribe?campaign=spring-survey-2026&token=" + "a1b2c3d4" * 16 + "&id={id}"
+    value = f"<{url}>, <mailto:unsubscribe@example.org?subject=unsubscribe>"
+    send(server, people[:1], list_unsubscribe=value, one_click_unsubscribe=True)
+    delivery = server.delivered[0]
+    assert b"=?" not in delivery.content
+    assert delivery.message["List-Unsubscribe"] == value.replace("{id}", "1")
+    assert delivery.message["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
