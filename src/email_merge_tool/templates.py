@@ -20,10 +20,13 @@ from __future__ import annotations
 import difflib
 import html
 import re
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any
 
 from .errors import EmailMergeError
 
@@ -158,7 +161,7 @@ class RenderedMessage:
     headers: dict[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class Template:
     """A message template: a subject, a plain-text and/or HTML body, and headers.
 
@@ -167,6 +170,13 @@ class Template:
     multipart/alternative messages are more accessible (screen readers,
     text-only clients) and are treated better by spam filters than HTML-only
     mail.
+
+    Pass every argument by keyword. Positional arguments still work but are
+    deprecated and raise a :class:`DeprecationWarning`, because
+    ``Template("Hi", "<p>x</p>")`` reads as an HTML body but is sent as text.
+
+    A template is immutable and hashable: ``headers`` is a read-only mapping,
+    so a header cannot be changed after it has been checked.
 
     Args:
         subject: Subject line; may contain placeholders.
@@ -184,20 +194,62 @@ class Template:
     headers: Mapping[str, str] = field(default_factory=dict)
     name: str = "default"
 
-    def __post_init__(self) -> None:
-        if self.text is None and self.html is None:
+    def __init__(
+        self,
+        *args: Any,
+        subject: str | None = None,
+        text: str | None = None,
+        html: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        name: str = "default",
+    ) -> None:
+        if args:
+            order = ("subject", "text", "html", "headers", "name")
+            if len(args) > len(order):
+                raise TypeError(f"Template takes at most {len(order)} arguments ({len(args)} given)")
+            warnings.warn(
+                "passing Template arguments by position is deprecated and will stop working in a later release; "
+                "use keywords, e.g. Template(subject=..., text=..., html=...)",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            passed: dict[str, Any] = dict(zip(order, args, strict=False))
+            keywords = {"subject": subject, "text": text, "html": html, "headers": headers}
+            for key in passed:
+                if keywords.get(key) is not None or (key == "name" and name != "default"):
+                    raise TypeError(f"Template got multiple values for argument {key!r}")
+            subject = passed.get("subject", subject)
+            text = passed.get("text", text)
+            html = passed.get("html", html)
+            headers = passed.get("headers", headers)
+            name = passed.get("name", name)
+        if subject is None:
+            raise TypeError("Template needs subject=")
+        if text is None and html is None:
             raise TemplateError("a template needs a text body, an HTML body, or both")
-        if not self.subject or not self.subject.strip():
-            raise TemplateError(f"template {self.name!r} has an empty subject")
+        if not subject.strip():
+            raise TemplateError(f"template {name!r} has an empty subject")
         normalized: dict[str, str] = {}
-        for key, value in self.headers.items():
+        for key, value in (headers or {}).items():
             canonical = header_name(key)
             if canonical == "Subject":
                 raise TemplateError("give the subject as subject=, not as a header")
             if canonical.lower() in {k.lower() for k in normalized}:
-                raise TemplateError(f"template {self.name!r} sets the {canonical} header twice")
+                raise TemplateError(f"template {name!r} sets the {canonical} header twice")
             normalized[canonical] = value
-        object.__setattr__(self, "headers", normalized)
+        object.__setattr__(self, "subject", subject)
+        object.__setattr__(self, "text", text)
+        object.__setattr__(self, "html", html)
+        object.__setattr__(self, "headers", MappingProxyType(normalized))
+        object.__setattr__(self, "name", name)
+
+    def __hash__(self) -> int:
+        return hash((self.subject, self.text, self.html, tuple(self.headers.items()), self.name))
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # A mappingproxy cannot be pickled or deep-copied; rebuild from a plain dict.
+        fields = {"subject": self.subject, "text": self.text, "html": self.html, "name": self.name}
+        return (_rebuild_template, (type(self), fields, dict(self.headers)))
 
     @property
     def fields(self) -> set[str]:
@@ -231,6 +283,10 @@ class Template:
         else:
             text_body = html_to_text(html_body or "")
         return RenderedMessage(to=to, subject=subject, text=text_body, html=html_body, headers=headers)
+
+
+def _rebuild_template(cls: type[Template], fields: dict[str, Any], headers: dict[str, str]) -> Template:
+    return cls(headers=headers, **fields)
 
 
 def _split_header_block(raw: str, source: str) -> tuple[dict[str, str], str]:

@@ -1,3 +1,7 @@
+import copy
+import dataclasses
+import pickle
+
 import pytest
 
 from email_merge_tool import Template, TemplateError, html_to_text, load_template
@@ -99,3 +103,30 @@ def test_text_plus_html_pair(tmp_path):
 
 def test_html_to_text_lists():
     assert html_to_text("<ul><li>a</li><li>b</li></ul>").strip() == "- a\n\n- b"
+
+
+def test_template_is_hashable_and_its_headers_are_read_only():
+    t = Template(subject="Hi {n}", text="x", headers={"reply-to": "help@example.org"})
+    same = Template(subject="Hi {n}", text="x", headers={"Reply-To": "help@example.org"})
+    assert t == same and hash(t) == hash(same) and len({t, same}) == 1
+    with pytest.raises(TypeError):
+        t.headers["Bcc"] = "spy@example.org"  # type: ignore[index]
+    assert dict(t.headers) == {"Reply-To": "help@example.org"}
+
+
+def test_template_survives_pickle_copy_and_replace():
+    t = Template(subject="Hi", text="x", headers={"X-Tag": "a"}, name="one")
+    assert pickle.loads(pickle.dumps(t)) == t
+    assert copy.deepcopy(t) == t
+    renamed = dataclasses.replace(t, name="two")
+    assert renamed.name == "two" and renamed.headers == {"X-Tag": "a"}
+
+
+def test_positional_template_arguments_are_deprecated():
+    with pytest.warns(DeprecationWarning, match="by position is deprecated"):
+        t = Template("Hi", "body", None, {"Reply-To": "help@example.org"}, "legacy")
+    assert (t.subject, t.text, t.name, dict(t.headers)) == ("Hi", "body", "legacy", {"Reply-To": "help@example.org"})
+    with pytest.warns(DeprecationWarning), pytest.raises(TypeError, match="multiple values for argument 'text'"):
+        Template("Hi", "body", text="other")
+    with pytest.raises(TypeError, match="subject="):
+        Template(text="body")

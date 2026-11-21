@@ -42,6 +42,7 @@
 
 ### Changed
 - A transport passed to a dry run adds a warning that it is not used. A transport whose `delivers` attribute is false, such as `DryRunTransport`, makes the run a dry run even with `dry_run=False`: results are `dry_run` and nothing is logged. `DryRunTransport` with `dry_run=False` used to log every recipient as `sent`, so a later real resume skipped them all. Passing both `output_dir=` and a `DryRunTransport` is an error.
+- `Template` takes keyword arguments. Positional arguments still work but raise a `DeprecationWarning`, because `Template("Hi", "<p>x</p>")` sent the HTML as plain text. A `Template` is hashable, and its `headers` are read-only, so a header added after creation can no longer skip the header checks.
 - With `--security none`, `--port` defaults to 25 instead of 587.
 - `email-merge --send` requires `--log FILE`, or `--no-log` to send without one.
 - New result and log status `uncertain`, new exception `UncertainSendError`, and `MergeReport.uncertain`. The CLI exits with 1 when any message is uncertain.

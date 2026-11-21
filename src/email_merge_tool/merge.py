@@ -137,7 +137,7 @@ def _as_templates(templates: TemplateLike | Sequence[TemplateLike] | Mapping[str
     for name, item in items:
         tpl = item if isinstance(item, Template) else load_template(item)
         if name is not None and tpl.name != name:
-            tpl = Template(tpl.subject, tpl.text, tpl.html, tpl.headers, name=name)
+            tpl = dataclasses.replace(tpl, name=name)
         if tpl.name in result:
             raise TemplateError(f"two templates are named {tpl.name!r}; give them distinct names")
         result[tpl.name] = tpl

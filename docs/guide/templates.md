@@ -181,3 +181,10 @@ t = Template(
 t.fields            # {'first_name'}
 t.render({"email": "a@example.org", "first_name": "Ann"})
 ```
+
+Pass the arguments by keyword. Positional arguments still work but raise a
+`DeprecationWarning`, since `Template("Hi", "<p>...</p>")` puts the HTML in
+the text body. A `Template` cannot be changed once created: its `headers` are
+a read-only mapping, so a header cannot skip the checks made when the
+template was built. Templates are hashable, so they can be dictionary keys or
+set members, and `dataclasses.replace(t, name="b")` makes a renamed copy.
