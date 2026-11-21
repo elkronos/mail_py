@@ -174,3 +174,27 @@ def test_template_with_a_control_character_in_a_header_is_refused_when_built():
         TemplateError, match=r"Reply-To header would contain the bidirectional control character U\+202E"
     ):
         Template(subject="Hi", text="x", headers={"Reply-To": "\u202eteam@example.org"})
+
+
+def test_fallback_for_empty_values():
+    assert fill("Dear {first_name|there},", {"first_name": "Ann"}) == "Dear Ann,"
+    for empty in ("", "   ", None):
+        assert fill("Dear {first_name|there},", {"first_name": empty}) == "Dear there,"
+    assert fill("{a|}", {"a": " "}) == ""
+    assert fill("<p>{org|R&D <lab>}</p>", {"org": ""}, escape_html=True) == "<p>R&amp;D &lt;lab&gt;</p>"
+    assert fill("{a|b|c} {a|x, y.}", {"a": ""}) == "b|c x, y."
+    assert placeholders("{a|x} {{b|y}} {c|} {d|{e}}") == {"a", "c", "e"}
+    assert fill("{{first_name|there}} {{x}}", {}) == "{first_name|there} {x}"
+    with pytest.raises(TemplateError, match="first_name"):
+        fill("Dear {first_name|there}", {})
+
+
+def test_fallback_in_subject_headers_and_html_only_template():
+    t = Template(subject="Hi {n|friend}", html="<p>Hi {n|friend & co}</p>", headers={"X-Name": "{n|none}"})
+    r = t.render({"email": "a@example.org", "n": ""})
+    assert (r.subject, r.html, r.text.strip(), r.headers["X-Name"]) == (
+        "Hi friend",
+        "<p>Hi friend &amp; co</p>",
+        "Hi friend & co",
+        "none",
+    )

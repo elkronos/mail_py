@@ -31,6 +31,7 @@ from .templates import (
     Template,
     TemplateError,
     _check_header_value,
+    _without_fallback,
     fill,
     header_name,
     load_template,
@@ -316,17 +317,26 @@ def mail_merge(
 
     extra = _extra_headers(extra_headers or {}, tpls)
     fields: set[str] = set().union(*(t.fields for t in tpls.values()), *(placeholders(v) for v in extra.values()))
+    bare: set[str] = set().union(
+        *(t._fields_without_fallback for t in tpls.values()), *(_without_fallback(v) for v in extra.values())
+    )
     if list_unsubscribe:
         fields |= placeholders(list_unsubscribe)
+        bare |= _without_fallback(list_unsubscribe)
     if envelope_from:
         fields |= placeholders(envelope_from)
+        bare |= _without_fallback(envelope_from)
+    optional = fields - bare  # every use has a fallback, so an empty value is expected
     if strata:
         fields |= {strata} if isinstance(strata, str) else set(strata)
     if variant_field:
         fields.add(variant_field)
     if attachment_field:
         fields.add(attachment_field)
-    issues = validate_recipients(records, fields, to_field=to_field, allow_duplicates=allow_duplicates)
+    optional -= {variant_field, attachment_field, *([strata] if isinstance(strata, str) else strata or [])}
+    issues = validate_recipients(
+        records, fields, to_field=to_field, allow_duplicates=allow_duplicates, optional_fields=optional
+    )
     keys = {normalize_address(r.get(to_field) or "") for r in records}
     skip: set[str] = set()
     if exclude is not None:

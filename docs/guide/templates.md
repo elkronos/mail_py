@@ -79,7 +79,9 @@ and `List-Unsubscribe-Post` (use `list_unsubscribe=` and `--one-click`), and
 | You write | You get |
 | --- | --- |
 | `{first_name}` | the value of the `first_name` column |
+| `{first_name|there}` | the value, or `there` when the cell is empty |
 | `{{first_name}}` | the literal text `{first_name}` |
+| `{{first_name|there}}` | the literal text `{first_name|there}` |
 | `p { margin: 0 }`, `a{color:red}` | unchanged (not placeholders) |
 
 Placeholder names follow Python identifier rules (`[A-Za-z_][A-Za-z0-9_]*`)
@@ -87,7 +89,17 @@ and are **case-sensitive**. If you write `{First_Name}` and the column is
 `first_name`, validation fails with a "did you mean" suggestion rather than
 guessing.
 
-Empty values render as empty strings, and validation warns about them.
+Empty values render as empty strings, and validation warns about them. To
+say what an empty cell should become, add a fallback after a `|`:
+`Dear {first_name|colleague},` gives "Dear colleague," for a row whose
+`first_name` is empty or only spaces. The fallback is plain text, written up
+to the closing brace (spaces included), and may not contain braces or line
+breaks, so placeholders cannot be nested. In HTML bodies it is HTML-escaped
+like a value. `{middle_name|}` has an empty fallback: the blank is
+intended. A column whose every placeholder has a fallback gets no
+empty-value warning; the column must still exist. The same `{name|fallback}`
+form is used by GMass and similar tools, so their templates work unchanged.
+
 Numbers from JSON are converted with `str()`. Format them in your data if you
 need a specific style (`"1,250.00"`).
 

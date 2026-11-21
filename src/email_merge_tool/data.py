@@ -481,6 +481,7 @@ def validate_recipients(
     *,
     to_field: str = "email",
     allow_duplicates: bool = False,
+    optional_fields: Iterable[str] = (),
 ) -> list[Issue]:
     """Check every record before sending anything.
 
@@ -492,7 +493,9 @@ def validate_recipients(
     * every placeholder used by the template(s) is a column in the data, with a
       "did you mean" suggestion for near misses such as ``First_Name``;
     * empty values for placeholders are reported as warnings (the message
-      would render with a blank, e.g. "Dear ,").
+      would render with a blank, e.g. "Dear ,"), except for
+      ``optional_fields``: those whose every placeholder has a fallback, as
+      in ``{first_name|there}``.
     """
     issues: list[Issue] = []
     if not records:
@@ -511,6 +514,7 @@ def validate_recipients(
         return issues
 
     seen: dict[str, int] = {}
+    may_be_empty = set(optional_fields)
     for row, record in enumerate(records, start=1):
         address = (record.get(to_field) or "").strip()
         if not address:
@@ -524,7 +528,7 @@ def validate_recipients(
         if key in seen and not allow_duplicates:
             issues.append(Issue(row, "error", f"duplicate address {address!r} (first seen in row {seen[key]})"))
         seen.setdefault(key, row)
-        for name in sorted(needed):
+        for name in sorted(needed - may_be_empty):
             if not (record.get(name) or "").strip():
                 issues.append(Issue(row, "warning", f"empty value for {{{name}}}"))
     return issues

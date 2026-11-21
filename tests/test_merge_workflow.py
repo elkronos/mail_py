@@ -838,3 +838,16 @@ def test_envelope_from_needs_a_transport_that_takes_it(people, fake_smtp):
         TPL, people[:1], sender=SENDER, dry_run=False, transport=gmail(), envelope_from="Bounces <b@example.org>"
     )
     assert fake_smtp.instances[0].envelopes[0][0] == "b@example.org"
+
+
+def test_fallbacks_fill_empty_values_without_a_warning(people):
+    rows = [dict(p, first_name="" if p["id"] == "2" else p["first_name"]) for p in people]
+    friendly = Template(subject="Hello {first_name|there}", text="Dear {first_name|colleague},\nWelcome.\n")
+    report = mail_merge(friendly, rows, sender=SENDER)
+    assert report.issues == []
+    assert report.messages[1]["Subject"] == "Hello there"
+    assert "Dear colleague," in report.messages[1].get_body(("plain",)).get_content()
+    mixed = Template(subject="Hello {first_name|there}", text="Dear {first_name},\nWelcome.\n")
+    assert [str(i) for i in mail_merge(mixed, rows, sender=SENDER).issues] == [
+        "warning: row 2: empty value for {first_name}"
+    ]

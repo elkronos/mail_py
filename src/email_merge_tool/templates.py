@@ -5,7 +5,11 @@ Placeholder syntax
 * ``{field}`` is replaced with the recipient's value for ``field``. Field names
   are Python-style identifiers (letters, digits, underscore; not starting with
   a digit) and are matched **exactly** (case-sensitive).
-* ``{{field}}`` produces a literal ``{field}`` in the output.
+* ``{field|fallback}`` uses ``fallback`` when the value is empty or only
+  whitespace. The fallback is plain text: no braces, line breaks or nested
+  placeholders.
+* ``{{field}}`` produces a literal ``{field}`` in the output, and
+  ``{{field|fallback}}`` a literal ``{field|fallback}``.
 * Any other brace (for example CSS such as ``p { margin: 0 }``) is left alone,
   so HTML templates with inline styles work without escaping.
 
@@ -46,7 +50,11 @@ __all__ = [
     "header_name",
 ]
 
-_PLACEHOLDER = re.compile(r"\{\{([A-Za-z_]\w*)\}\}|\{([A-Za-z_]\w*)\}")
+# {name} or {name|fallback}; the same in double braces is the literal text.
+_PLACEHOLDER = re.compile(
+    r"\{\{(?P<literal>[A-Za-z_]\w*(?:\|[^{}\r\n]*)?)\}\}"
+    r"|\{(?P<name>[A-Za-z_]\w*)(?:\|(?P<fallback>[^{}\r\n]*))?\}"
+)
 
 #: Address headers a template may set. Each value is checked as addresses.
 ADDRESS_HEADERS = ("From", "Sender", "Reply-To", "Cc", "Bcc")
@@ -170,27 +178,43 @@ def _is_header_name(name: str) -> bool:
 
 
 def placeholders(text: str | None) -> set[str]:
-    """Names of the ``{field}`` placeholders in ``text`` (escaped ``{{x}}`` excluded)."""
+    """Names of the ``{field}`` placeholders in ``text`` (escaped ``{{x}}`` excluded).
+
+    ``{field|fallback}`` counts as ``field``.
+    """
     if not text:
         return set()
-    return {m.group(2) for m in _PLACEHOLDER.finditer(text) if m.group(2)}
+    return {m["name"] for m in _PLACEHOLDER.finditer(text) if m["name"]}
+
+
+def _without_fallback(text: str | None) -> set[str]:
+    """Names used at least once in ``text`` without a ``|fallback``."""
+    if not text:
+        return set()
+    return {m["name"] for m in _PLACEHOLDER.finditer(text) if m["name"] and m["fallback"] is None}
 
 
 def fill(text: str, values: Mapping[str, object], *, escape_html: bool = False) -> str:
     """Replace ``{field}`` placeholders in ``text`` with ``values``.
+
+    ``{field|fallback}`` is replaced with ``fallback`` when the value is
+    empty, ``None`` or only whitespace. With ``escape_html``, values and
+    fallbacks are HTML-escaped.
 
     Raises:
         TemplateError: if a placeholder has no entry in ``values``.
     """
 
     def repl(match: re.Match[str]) -> str:
-        literal, name = match.group(1), match.group(2)
+        literal, name, fallback = match["literal"], match["name"], match["fallback"]
         if literal is not None:
             return "{" + literal + "}"
         if name not in values:
             raise TemplateError(f"no value for placeholder {{{name}}}")
         value = values[name]
         value = "" if value is None else str(value)
+        if fallback is not None and not value.strip():
+            value = fallback
         return html.escape(value) if escape_html else value
 
     return _PLACEHOLDER.sub(repl, text)
@@ -308,6 +332,14 @@ class Template:
         found = placeholders(self.subject) | placeholders(self.text) | placeholders(self.html)
         for value in self.headers.values():
             found |= placeholders(value)
+        return found
+
+    @property
+    def _fields_without_fallback(self) -> set[str]:
+        """Placeholder names used at least once without a ``|fallback``."""
+        found = _without_fallback(self.subject) | _without_fallback(self.text) | _without_fallback(self.html)
+        for value in self.headers.values():
+            found |= _without_fallback(value)
         return found
 
     def render(self, record: Mapping[str, object], *, to_field: str = "email") -> RenderedMessage:

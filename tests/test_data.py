@@ -326,3 +326,9 @@ def test_addresses_with_control_characters_are_invalid(char):
     assert _parse_mailbox(value) == (None, f"contains a control character (U+{ord(char):04X})")
     assert not _valid_address_list(f"lee@example.org, {value}")
     assert _valid_address_list("Ann\tLee <ann@example.org>")
+
+
+def test_empty_values_of_optional_fields_are_not_reported():
+    rows = [{"email": "ann@example.org", "first_name": "", "dept": ""}]
+    issues = validate_recipients(rows, {"first_name", "dept"}, optional_fields={"first_name"})
+    assert [i.message for i in issues] == ["empty value for {dept}"]
