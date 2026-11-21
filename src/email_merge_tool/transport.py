@@ -350,6 +350,38 @@ def _mailbox_problem(text: str) -> bool:
     return status.group(2) == "2" or (status.group(2) == "1" and status.group(3) not in ("7", "8"))
 
 
+def _enhanced_status(text: str) -> str | None:
+    """The enhanced status code (RFC 3463) a reply starts with, such as ``"5.1.1"``, or None."""
+    status = _ENHANCED_STATUS.match(text)
+    return ".".join(status.groups()) if status is not None else None
+
+
+# Reply text that names an unknown recipient, for a 550 without an enhanced status code.
+_UNKNOWN_USER = re.compile(
+    r"\b(?:unknown (?:user|recipient|mailbox)|(?:user|recipient|mailbox) unknown|no such (?:user|recipient|mailbox)"
+    r"|(?:user|recipient|mailbox|address)(?: \S+)? (?:does not|doesn't) exist|invalid (?:recipient|mailbox))\b",
+    re.IGNORECASE,
+)
+
+
+def _bounced(code: int | None, text: str) -> bool:
+    """Whether a reply refuses the recipient's mailbox for good: a hard bounce.
+
+    That is a 5xx reply with enhanced status 5.1.x (a bad or unknown address;
+    5.1.7 and 5.1.8 are about the sender, so they do not count) or 5.2.1 (the
+    mailbox is disabled), or a 550 without an enhanced status whose text says
+    the user is unknown. A full mailbox (5.2.2) and policy refusals (5.7.x)
+    are not bounces: the address exists and may take mail later.
+    """
+    if code is None or not 500 <= code < 600:
+        return False
+    status = _ENHANCED_STATUS.match(text)
+    if status is None:
+        return code == 550 and _UNKNOWN_USER.search(text) is not None
+    kind, subject, detail = status.groups()
+    return kind == "5" and ((subject == "1" and detail not in ("7", "8")) or (subject, detail) == ("2", "1"))
+
+
 def _reply(error: BaseException, main: set[str]) -> tuple[int | None, str]:
     """The code and text of the reply behind an error: a main recipient's, if several."""
     if isinstance(error, smtplib.SMTPRecipientsRefused) and error.recipients:

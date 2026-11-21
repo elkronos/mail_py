@@ -204,3 +204,23 @@ def test_a_stop_mid_run_prints_what_was_done(files, fake_smtp, capsys):
     err = capsys.readouterr().err
     assert "Stopped after 2 of 3 recipient(s): sent: 1, failed: 1." in err
     assert err.index("Stopped after") < err.index("Re-run with --resume")
+
+
+def test_bounces_exit_1_and_resume_skips_them_unless_asked(files, fake_smtp, capsys):
+    log = str(files / "sent.jsonl")
+    fake_smtp.failures = [smtplib.SMTPRecipientsRefused({"ann@example.org": (550, b"5.1.1 No such user")})]
+    assert main(_send_args(files, "--log", log)) == 1
+    captured = capsys.readouterr()
+    assert "bounced  ann@example.org (recipient refused: ann@example.org (550 5.1.1 No such user))" in captured.out
+    assert "Done: sent: 1, bounced: 1." in captured.out
+    assert "1 address(es) bounced" in captured.err
+
+    assert main(_send_args(files, "--log", log, "--resume")) == 0
+    assert "(1 address(es) recorded as sent or uncertain, 1 as bounced)" in capsys.readouterr().out
+    assert sum(len(c.sent) for c in fake_smtp.instances) == 1  # nobody was mailed again
+
+    assert main(_send_args(files, "--log", log, "--resume", "--retry-bounced")) == 0
+    assert [m["To"] for c in fake_smtp.instances for m in c.sent] == ["bo@example.org", "ann@example.org"]
+    with pytest.raises(SystemExit):
+        main(_send_args(files, "--log", log, "--retry-bounced"))
+    assert "--retry-bounced needs --resume" in capsys.readouterr().err

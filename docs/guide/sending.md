@@ -78,7 +78,11 @@ unencrypted.
   take the message, so it is retried. The tool waits up to 10 minutes for the
   server's reply to the message content (RFC 5321).
 - **Permanent** failures for one recipient (5xx) are recorded as `failed`, and
-  the run continues.
+  the run continues. A refusal that says the mailbox doesn't exist or is
+  disabled (`5.1.x`, `5.2.1`, or `550 User unknown`) is recorded as `bounced`,
+  and `--resume` doesn't mail that address again; see
+  [Resume](resume.md#resume). Each result and log line carries the reply as
+  `smtp_code` and `enhanced_status`.
 - **Fatal** failures (can't connect, login rejected) stop the run with a clear
   message. Use `--resume` afterwards. The message names the step that failed
   (connecting, TLS or login) and what to try, such as `--security none` for

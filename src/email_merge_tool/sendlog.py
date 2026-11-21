@@ -3,8 +3,10 @@
 The log is both an audit trail (who received which variant, when, and with
 what Message-ID) and the mechanism behind ``resume``: recipients with a
 ``"sent"`` or ``"uncertain"`` entry are skipped on the next run, so re-running
-after a crash or a provider's daily limit does not email them again. A run
-refuses to reuse a log that already records sent messages unless it resumes.
+after a crash or a provider's daily limit does not email them again.
+Addresses with a ``"bounced"`` entry, which the server refused for good, are
+skipped too unless the run asks to retry them. A run refuses to reuse a log
+that already records sent messages unless it resumes.
 
 Each line is flushed and ``fsync``-ed immediately after the server answers.
 A message is logged ``"uncertain"`` when the connection drops after its data
@@ -28,7 +30,7 @@ from typing import Any
 
 from .data import DataError, is_valid_address, normalize_address
 
-__all__ = ["SendLog", "read_log", "sent_addresses"]
+__all__ = ["SendLog", "read_log", "sent_addresses", "bounced_addresses"]
 
 _WINDOWS_LOCK_OFFSET = 2**31 - 2
 
@@ -121,12 +123,26 @@ def read_log(path: str | Path) -> Iterator[dict[str, Any]]:
 #: Log statuses that mean the recipient may already have the message.
 DELIVERED_STATUSES = frozenset({"sent", "uncertain"})
 
+#: Log statuses that mean the server refused the recipient's mailbox for good
+#: (an unknown user or a disabled mailbox). Nobody received the message, so
+#: these are not delivered; resume skips them unless asked to retry them.
+BOUNCED_STATUSES = frozenset({"bounced"})
+
 
 def sent_addresses(path: str | Path) -> set[str]:
     """Normalized addresses with a ``"sent"`` or ``"uncertain"`` record in the log."""
+    return _addresses(path, DELIVERED_STATUSES)
+
+
+def bounced_addresses(path: str | Path) -> set[str]:
+    """Normalized addresses with a ``"bounced"`` record in the log: mailboxes the server refused for good."""
+    return _addresses(path, BOUNCED_STATUSES)
+
+
+def _addresses(path: str | Path, statuses: frozenset[str]) -> set[str]:
     found: set[str] = set()
     for record in read_log(path):
-        if record.get("status") in DELIVERED_STATUSES and record.get("to"):
+        if record.get("status") in statuses and record.get("to"):
             found |= _logged_keys(str(record["to"]))
     return found
 

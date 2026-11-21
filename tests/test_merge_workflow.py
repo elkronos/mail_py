@@ -524,7 +524,7 @@ def test_a_transport_that_refuses_the_to_address_fails_the_row(people, tmp_path)
 
         def send(self, message):
             if message["To"] == "bo@example.org":
-                return {"Bo@Example.org": (550, b"5.1.1 no such user"), "x@example.org": (550, b"no")}
+                return {"Bo@Example.org": (554, b"5.7.1 policy"), "x@example.org": (550, b"no")}
             return {"lee@example.org": (550, b"5.1.1 no such user")}
 
         def close(self):
@@ -536,7 +536,7 @@ def test_a_transport_that_refuses_the_to_address_fails_the_row(people, tmp_path)
         ("sent", "some recipients refused: lee@example.org (550 5.1.1 no such user)"),
         (
             "failed",
-            "recipient refused: Bo@Example.org (550 5.1.1 no such user); the other recipients were sent the message",
+            "recipient refused: Bo@Example.org (554 5.7.1 policy); the other recipients were sent the message",
         ),
     ]
     assert sent_addresses(log) == {"ann@example.org"}
@@ -665,3 +665,53 @@ def test_sending_without_a_log_warns(people, fake_smtp, tmp_path):
     ]
     assert not warned(mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=gmail(), log_path=tmp_path / "l"))
     assert not warned(mail_merge(TPL, people, sender=SENDER))
+
+
+def test_a_transport_reports_bounces_with_the_reply(people, tmp_path):
+    from email_merge_tool import PermanentSendError
+
+    class Provider:
+        def open(self):
+            pass
+
+        def send(self, message):
+            if message["To"] == "ann@example.org":
+                raise PermanentSendError("hard bounce", smtp_code=550, smtp_error="5.1.1 mailbox does not exist")
+            if message["To"] == "bo@example.org":
+                return {"bo@example.org": (550, "5.2.1 mailbox disabled")}  # text may be str
+
+        def close(self):
+            pass
+
+    log = tmp_path / "log.jsonl"
+    report = mail_merge(TPL, people[:3], sender=SENDER, dry_run=False, transport=Provider(), log_path=log)
+    assert [(r.status, r.smtp_code, r.enhanced_status) for r in report.results] == [
+        ("bounced", 550, "5.1.1"),
+        ("bounced", 550, "5.2.1"),
+        ("sent", None, None),
+    ]
+    assert report.bounced == 2 and report.failed == 0
+    assert sent_addresses(log) == {"cy@example.org"}
+    from email_merge_tool import bounced_addresses
+
+    assert bounced_addresses(log) == {"ann@example.org", "bo@example.org"}
+
+
+def test_retry_bounced_needs_resume(people, tmp_path):
+    with pytest.raises(ValueError, match="retry_bounced=True needs resume=True"):
+        mail_merge(TPL, people, sender=SENDER, log_path=tmp_path / "l", retry_bounced=True)
+
+
+def test_a_dry_run_resume_shows_bounced_addresses_as_skipped(people, tmp_path):
+    log = tmp_path / "log.jsonl"
+    log.write_text(
+        json.dumps({"to": "ann@example.org", "status": "sent"})
+        + "\n"
+        + json.dumps({"to": "Bo@Example.org", "status": "bounced", "smtp_code": 550, "enhanced_status": "5.1.1"})
+        + "\n",
+        encoding="utf-8",
+    )
+    report = mail_merge(TPL, people, sender=SENDER, log_path=log, resume=True)
+    assert [r.status for r in report.results] == ["skipped", "skipped", "dry_run", "dry_run"]
+    again = mail_merge(TPL, people, sender=SENDER, log_path=log, resume=True, retry_bounced=True)
+    assert [r.status for r in again.results] == ["skipped", "dry_run", "dry_run", "dry_run"]

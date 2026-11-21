@@ -392,11 +392,11 @@ ARCHIVED = Template(subject="Hello {first_name}", text="Dear {first_name}", head
 
 
 def test_refused_to_with_an_accepted_cc_is_failed_and_resumable(server, people, sleeps, tmp_path):
-    server.rcpt["ann@example.org"] = ["550 5.1.1 No such user"]
+    server.rcpt["ann@example.org"] = ["550 5.7.1 Recipient rejected by policy"]
     report = send(server, people[:2], template=ARCHIVED, tmp_path=tmp_path)
     assert [r.status for r in report.results] == ["failed", "sent"]
     assert report.failed == 1
-    assert "ann@example.org (550 5.1.1 No such user)" in report.results[0].detail
+    assert "ann@example.org (550 5.7.1 Recipient rejected by policy)" in report.results[0].detail
     assert [d.rcpt_tos for d in server.delivered] == [
         ["archive@example.org"],
         ["bo@example.org", "archive@example.org"],
@@ -453,7 +453,7 @@ def test_rcpt_4xx_that_persists_fails_after_the_retries(server, people, sleeps, 
 def test_rcpt_5xx_fails_at_once(server, people, sleeps, tmp_path):
     server.rcpt["ann@example.org"] = ["550 5.1.1 No such user"]
     report = send(server, people[:2], tmp_path=tmp_path)
-    assert [r.status for r in report.results] == ["failed", "sent"]
+    assert [r.status for r in report.results] == ["bounced", "sent"]
     assert report.results[0].detail == "recipient refused: ann@example.org (550 5.1.1 No such user)"
     assert server.commands.count(("RCPT", "ann@example.org")) == 1 and sleeps == []
 
@@ -530,7 +530,7 @@ def test_unknown_addresses_do_not_count_and_a_sent_message_resets(server, sleeps
         server.rcpt[f"r{i}@example.org"] = ["550 5.1.1 No such user"]
     server.data = ["554 5.7.1 Message rejected", None, "554 5.7.1 Message rejected", None]
     report = send(server, rows(7), max_consecutive_failures=2)
-    assert [r.status for r in report.results] == ["failed"] * 4 + ["sent", "failed", "sent"]
+    assert [r.status for r in report.results] == ["bounced"] * 3 + ["failed", "sent", "failed", "sent"]
 
 
 def test_long_list_unsubscribe_arrives_verbatim(server, people, sleeps):
@@ -586,3 +586,28 @@ def test_the_report_comes_with_an_account_refusal(server, people, sleeps):
     report = info.value.report
     assert [(r.to, r.status) for r in report.results] == [("ann@example.org", "sent"), ("bo@example.org", "failed")]
     assert any("sending without a log" in issue.message for issue in report.issues)
+
+
+def test_unknown_mailboxes_bounce_and_resume_skips_them(server, people, sleeps, tmp_path):
+    server.rcpt["ann@example.org"] = ["550 5.1.1 No such user"]
+    server.rcpt["bo@example.org"] = ["550 User unknown"]  # no enhanced status code
+    server.rcpt["cy@example.org"] = ["552 5.2.2 Mailbox full"]  # the address exists: not a bounce
+    report = send(server, people, template=ARCHIVED, tmp_path=tmp_path)
+    assert [(r.status, r.smtp_code, r.enhanced_status) for r in report.results] == [
+        ("bounced", 550, "5.1.1"),
+        ("bounced", 550, None),
+        ("failed", 552, "5.2.2"),
+        ("sent", None, None),
+    ]
+    assert report.summary() == "sent: 1, failed: 1, bounced: 2"
+    records = list(read_log(tmp_path / "log.jsonl"))
+    assert [(r["status"], r["smtp_code"], r["enhanced_status"]) for r in records][0] == ("bounced", 550, "5.1.1")
+    assert [d.rcpt_tos for d in server.delivered][:2] == [["archive@example.org"], ["archive@example.org"]]
+
+    again = send(server, people, template=ARCHIVED, tmp_path=tmp_path, resume=True)
+    assert [r.status for r in again.results] == ["skipped", "skipped", "sent", "skipped"]
+    assert again.results[0].detail.startswith("bounced in an earlier run")
+    assert server.commands.count(("RCPT", "ann@example.org")) == 1  # not mailed again
+
+    fixed = send(server, people, template=ARCHIVED, tmp_path=tmp_path, resume=True, retry_bounced=True)
+    assert [r.status for r in fixed.results] == ["sent", "sent", "skipped", "skipped"]

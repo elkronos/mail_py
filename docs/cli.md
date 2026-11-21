@@ -38,7 +38,8 @@ Without `--send`, the command validates everything, prints the first message
 | `--no-auth` | Don't log in (for example, an internal relay). |
 | `--log FILE` | JSON Lines send log. Required with `--send`. If the file already records sent messages, the run is refused unless you add `--resume`. |
 | `--no-log` | Send without a log. An interrupted run then cannot be resumed, and a repeated run is not refused. |
-| `--resume` | Skip addresses the log records as `sent` or `uncertain`. Needs `--log`; the log must exist and belong to this mailing. |
+| `--resume` | Skip addresses the log records as `sent`, `uncertain` or `bounced`. Needs `--log`; the log must exist and belong to this mailing. |
+| `--retry-bounced` | With `--resume`, send again to addresses the log records as `bounced` (unknown user or disabled mailbox). |
 | `--exclude FILE` | Addresses to skip (`.txt`, one per line, or `.csv`/`.json`). Every entry must be one valid address; see [reminder waves](guide/resume.md#reminder-waves). |
 | `--limit N` | Send at most N messages this run. |
 | `--max-failures N` | Stop after N failed messages in a row (default 5; `0` never stops). Unknown addresses and full mailboxes don't count. |
@@ -54,7 +55,7 @@ or an interactive prompt.
 | Code | Meaning |
 | --- | --- |
 | 0 | Success (a dry run, or every message sent) |
-| 1 | Some messages failed or are `uncertain`, or you declined the confirmation |
+| 1 | Some messages failed, bounced or are `uncertain`, or you declined the confirmation |
 | 2 | Validation, template or connection error (nothing was sent by this invocation, or it stopped early; it prints how far it got, and the log has the details) |
 | 130 | Interrupted with Ctrl-C (re-run with `--resume`) |
 

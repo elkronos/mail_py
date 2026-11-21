@@ -23,7 +23,7 @@ from .data import (
 )
 from .experiment import Assignment, assign_variants, write_assignments
 from .message import attachment_name, build_message, stamp_date, wire_bytes
-from .sendlog import SendLog, sent_addresses
+from .sendlog import SendLog, bounced_addresses, sent_addresses
 from .templates import ADDRESS_HEADERS, Template, TemplateError, fill, header_name, load_template, placeholders
 from .transport import (
     DryRunTransport,
@@ -32,7 +32,9 @@ from .transport import (
     Transport,
     TransportError,
     UncertainSendError,
+    _bounced,
     _describe_refused,
+    _enhanced_status,
     _mailbox_problem,
     _text,
 )
@@ -46,16 +48,31 @@ TemplateLike = Template | str | Path
 
 @dataclass
 class Result:
-    """Outcome for one recipient."""
+    """Outcome for one recipient.
+
+    Attributes:
+        to: The recipient's address, as in the data.
+        status: ``"sent"``, ``"dry_run"``, ``"failed"``, ``"skipped"``,
+            ``"bounced"`` (the server refused the mailbox for good: an unknown
+            user or a disabled mailbox; resume skips it), or ``"uncertain"``
+            (the connection dropped after the message data went out, so the
+            server may have accepted it; it is not retried, and resume skips it).
+        variant: The template this recipient was assigned, with several templates.
+        message_id: The message's ``Message-ID``.
+        detail: Why a message failed, bounced or was skipped, or which other
+            recipients were refused.
+        smtp_code: The server's reply code behind a failure or bounce, such as 550.
+        enhanced_status: The reply's enhanced status code (RFC 3463), such
+            as ``"5.1.1"``, when the server gave one.
+    """
 
     to: str
-    # "sent", "dry_run", "failed", "skipped", or "uncertain": the connection
-    # dropped after the message data went out, so the server may have accepted
-    # it. Uncertain messages are not retried, and resume skips them.
     status: str
     variant: str | None = None
     message_id: str | None = None
     detail: str = ""
+    smtp_code: int | None = None
+    enhanced_status: str | None = None
 
 
 @dataclass
@@ -93,8 +110,12 @@ class MergeReport:
     def uncertain(self) -> int:
         return self.count("uncertain")
 
+    @property
+    def bounced(self) -> int:
+        return self.count("bounced")
+
     def summary(self) -> str:
-        statuses = ("sent", "dry_run", "failed", "uncertain", "skipped")
+        statuses = ("sent", "dry_run", "failed", "bounced", "uncertain", "skipped")
         parts = [f"{s}: {self.count(s)}" for s in statuses if self.count(s)]
         return ", ".join(parts) or "nothing to do"
 
@@ -136,6 +157,7 @@ def mail_merge(
     exclude: object = None,
     log_path: str | Path | None = None,
     resume: bool = False,
+    retry_bounced: bool = False,
     limit: int | None = None,
     min_interval: float = 0.0,
     list_unsubscribe: str | None = None,
@@ -182,7 +204,9 @@ def mail_merge(
             everyone twice. Sending without a log adds a warning to the
             report, since a run that stops part-way cannot be resumed.
         resume: Skip recipients the log already records as ``sent`` (or
-            ``uncertain``).
+            ``uncertain``), and addresses it records as ``bounced``.
+        retry_bounced: With ``resume``, send again to addresses the log
+            records as ``bounced`` (for example after fixing a mail server).
         limit: Send at most this many messages this run (e.g. a daily quota).
         min_interval: Seconds to wait between send attempts, failed ones
             included (rate limiting).
@@ -232,6 +256,8 @@ def mail_merge(
     records = load_recipients(recipients)
     if resume and log_path is None:
         raise ValueError("resume=True needs log_path")
+    if retry_bounced and not resume:
+        raise ValueError("retry_bounced=True needs resume=True: only a resumed run skips bounced addresses")
     if not dry_run and transport is None:
         raise ValueError("dry_run=False needs a transport (e.g. SMTPTransport)")
     if seed is not None and variant_field is not None:
@@ -270,10 +296,13 @@ def mail_merge(
                 note = f"none of its {len(skip)} address(es) is in the recipient data"
                 issues.append(Issue(None, "warning", note, where="exclude list"))
     already: set[str] = set()
+    bounced: set[str] = set()  # resume skips these too, unless retry_bounced
     if log_path is not None:
         already, log_issue = _check_send_log(Path(log_path), resume, keys)
         if log_issue is not None:
             issues.insert(0, log_issue)
+        if resume and not retry_bounced:
+            bounced = bounced_addresses(log_path)
     if sender and not is_valid_address(sender):
         issues.insert(0, Issue(None, "error", f"invalid sender address {sender!r}"))
     if not dry_run and log_path is None:
@@ -376,6 +405,7 @@ def mail_merge(
 
     if not resume:
         already = set()
+        bounced = set()
 
     log: SendLog | None = None
     if log_path is not None and not dry_run:
@@ -394,6 +424,7 @@ def mail_merge(
             raise DataError(_describe([issue]), [issue])
         if resume:
             already = current
+            bounced = set() if retry_bounced else bounced_addresses(log_path)
 
     active: Transport = transport if (transport is not None and not dry_run) else DryRunTransport(output_dir)
     delivered = attempted = 0
@@ -405,8 +436,13 @@ def mail_merge(
             key = normalize_address(to)
             variant_label = variant if len(tpls) > 1 else None
             stop: FatalSendError | None = None
-            if key in skip or key in already:
-                reason = "excluded" if key in skip else "already in the send log"
+            if key in skip or key in already or key in bounced:
+                if key in skip:
+                    reason = "excluded"
+                elif key in already:
+                    reason = "already in the send log"
+                else:
+                    reason = "bounced in an earlier run (retry_bounced or --retry-bounced sends to it again)"
                 result = Result(to, "skipped", variant_label, detail=reason)
             elif limit is not None and delivered >= limit:
                 result = Result(to, "skipped", variant_label, detail="limit reached")
@@ -420,17 +456,15 @@ def mail_merge(
                 except FatalSendError as exc:  # e.g. a quota or a failed reconnect: this one was not sent
                     # An unexpected exception from a transport says nothing about whether it was sent.
                     status = "uncertain" if isinstance(exc, TransportError) else "failed"
-                    result, stop = Result(to, status, variant_label, str(message["Message-ID"]), str(exc)), exc
+                    code, text = _error_reply(exc)
+                    result = Result(
+                        to, status, variant_label, str(message["Message-ID"]), str(exc), code, _enhanced_status(text)
+                    )
+                    stop = exc
                 except BaseException:
                     if log is not None and getattr(active, "unconfirmed", False):  # e.g. Ctrl-C awaiting the reply
-                        log.write(
-                            to=to,
-                            status="uncertain",
-                            variant=variant_label,
-                            message_id=str(message["Message-ID"]),
-                            detail="interrupted after the message was sent; it may have arrived",
-                            seed=seed,
-                        )
+                        detail = "interrupted after the message was sent; it may have arrived"
+                        _write(log, Result(to, "uncertain", variant_label, str(message["Message-ID"]), detail), seed)
                     raise
                 if result.status in {"sent", "dry_run", "uncertain"}:  # an uncertain one most likely went out
                     delivered += 1
@@ -449,14 +483,7 @@ def mail_merge(
                         )
             report.results.append(result)
             if log is not None:
-                log.write(
-                    to=to,
-                    status=result.status,
-                    variant=result.variant,
-                    message_id=result.message_id,
-                    detail=result.detail,
-                    seed=seed,
-                )
+                _write(log, result, seed)
             if progress is not None:
                 progress(result)
             if stop is not None:
@@ -472,6 +499,25 @@ def mail_merge(
             if log is not None:
                 log.close()
     return report
+
+
+def _error_reply(exc: BaseException) -> tuple[int | None, str]:
+    """The ``smtp_code`` and ``smtp_error`` of a send error, if it has them."""
+    code = getattr(exc, "smtp_code", None)
+    return (code if isinstance(code, int) else None), _text(getattr(exc, "smtp_error", None) or "")
+
+
+def _write(log: SendLog, result: Result, seed: int | str | None) -> None:
+    log.write(
+        to=result.to,
+        status=result.status,
+        variant=result.variant,
+        message_id=result.message_id,
+        detail=result.detail,
+        smtp_code=result.smtp_code,
+        enhanced_status=result.enhanced_status,
+        seed=seed,
+    )
 
 
 def _open(transport: Transport) -> None:
@@ -598,10 +644,14 @@ def _deliver(
         refused = transport.send(message)
     except UncertainSendError as exc:
         logger.warning("delivery to %s is uncertain: %s", to, exc)
-        return Result(to, "uncertain", variant, message_id, str(exc)), False
+        code, text = _error_reply(exc)
+        return Result(to, "uncertain", variant, message_id, str(exc), code, _enhanced_status(text)), False
     except PermanentSendError as exc:
-        logger.warning("failed to send to %s: %s", to, exc)
-        return Result(to, "failed", variant, message_id, str(exc)), not _mailbox_problem(getattr(exc, "smtp_error", ""))
+        code, text = _error_reply(exc)
+        status = "bounced" if _bounced(code, text) else "failed"
+        logger.warning("%s: %s: %s", status, to, exc)
+        result = Result(to, status, variant, message_id, str(exc), code, _enhanced_status(text))
+        return result, not _mailbox_problem(text)
     except FatalSendError:
         raise
     except Exception as exc:  # outside the transport contract: stop, and keep the report
@@ -613,10 +663,12 @@ def _deliver(
     mine = {address: reply for address, reply in refused.items() if normalize_address(address) == key}
     if mine:  # a Cc or Bcc took it, but the person this row is for did not
         detail = f"recipient refused: {_describe_refused(mine)}; the other recipients were sent the message"
-        logger.warning("failed to send to %s: %s", to, detail)
         reply = next(iter(mine.values()))
-        text = _text(reply[1]) if isinstance(reply, tuple) and len(reply) == 2 else ""
-        return Result(to, "failed", variant, message_id, detail), not _mailbox_problem(text)
+        code, text = (reply[0], _text(reply[1])) if isinstance(reply, tuple) and len(reply) == 2 else (None, "")
+        code = code if isinstance(code, int) else None
+        status = "bounced" if _bounced(code, text) else "failed"
+        logger.warning("%s: %s: %s", status, to, detail)
+        return Result(to, status, variant, message_id, detail, code, _enhanced_status(text)), not _mailbox_problem(text)
     detail = f"some recipients refused: {_describe_refused(refused)}" if refused else ""
     return Result(to, "dry_run" if dry_run else "sent", variant, message_id, detail), False
 

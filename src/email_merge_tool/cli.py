@@ -13,7 +13,7 @@ from pathlib import Path
 from . import __version__
 from .data import DataError
 from .merge import MergeReport, Result, mail_merge
-from .sendlog import sent_addresses
+from .sendlog import bounced_addresses, sent_addresses
 from .templates import TemplateError, load_template
 from .transport import PRESETS, FatalSendError, SMTPConfig, SMTPTransport
 
@@ -106,7 +106,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="send without a log (an interrupted run cannot be resumed, and a repeated run is not refused)",
     )
-    g.add_argument("--resume", action="store_true", help="skip recipients --log records as sent or uncertain")
+    g.add_argument("--resume", action="store_true", help="skip recipients --log records as sent, uncertain or bounced")
+    g.add_argument(
+        "--retry-bounced",
+        action="store_true",
+        help="with --resume, send again to addresses --log records as bounced (unknown user, disabled mailbox)",
+    )
     g.add_argument("--exclude", metavar="FILE", help="addresses to skip (.txt one per line, or .csv/.json)")
     g.add_argument("--limit", type=int, help="send at most N messages this run")
     g.add_argument(
@@ -181,6 +186,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.resume and not args.log:
         parser.error("--resume needs --log FILE: the log of the run you are continuing")
+    if args.retry_bounced and not args.resume:
+        parser.error("--retry-bounced needs --resume: only a resumed run skips bounced addresses")
     if args.max_failures < 0:
         parser.error("--max-failures must be 0 (never stop) or more")
     sending = False
@@ -201,6 +208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             exclude=args.exclude,
             log_path=args.log,
             resume=args.resume,
+            retry_bounced=args.retry_bounced,
             limit=args.limit,
             list_unsubscribe=args.list_unsubscribe,
             one_click_unsubscribe=args.one_click,
@@ -246,7 +254,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"sending). {kept}".rstrip(),
                 file=sys.stderr,
             )
-        return 1 if report.failed or report.uncertain else 0
+        if report.bounced:
+            print(
+                f"{report.bounced} address(es) bounced: the server says the mailbox does not exist or is "
+                "disabled. --resume skips them; remove them from your list.",
+                file=sys.stderr,
+            )
+        return 1 if report.failed or report.bounced or report.uncertain else 0
     except DataError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -277,7 +291,9 @@ def _show_log(path: Path) -> None:
     if not resolved.exists():
         print(f"Send log: {resolved} (new file)")
     else:
-        print(f"Send log: {resolved} ({len(sent_addresses(resolved))} address(es) recorded as sent or uncertain)")
+        bounced = len(bounced_addresses(resolved))
+        also = f", {bounced} as bounced" if bounced else ""
+        print(f"Send log: {resolved} ({len(sent_addresses(resolved))} address(es) recorded as sent or uncertain{also})")
 
 
 def _show_preview(report: MergeReport, count: int) -> None:

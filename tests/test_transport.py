@@ -1,6 +1,6 @@
 import pytest
 
-from email_merge_tool.transport import _account_refusal, _mailbox_problem
+from email_merge_tool.transport import _account_refusal, _bounced, _enhanced_status, _mailbox_problem
 
 
 @pytest.mark.parametrize(
@@ -40,3 +40,34 @@ def test_account_level_replies(code, text, account):
 )
 def test_mailbox_problems(text, mailbox):
     assert _mailbox_problem(text) is mailbox
+
+
+@pytest.mark.parametrize(
+    ("code", "text", "bounce"),
+    [
+        (550, "5.1.1 The email account that you tried to reach does not exist.", True),  # Gmail
+        (550, "5.1.10 RESOLVER.ADR.RecipientNotFound; Recipient not found by SMTP address lookup", True),  # Microsoft
+        (553, "5.1.3 Bad recipient address syntax", True),
+        (550, "5.2.1 The email account that you tried to reach is disabled.", True),
+        (550, "User unknown", True),
+        (550, "Recipient address rejected: unknown user", True),
+        (550, "no such user here", True),
+        (552, "5.2.2 Mailbox full", False),  # exists, may take mail later
+        (550, "5.1.7 Bad sender address", False),  # about the sender
+        (550, "5.7.1 Message rejected as spam", False),
+        (550, "Requested action not taken: mailbox unavailable", False),  # also used for policy refusals
+        (553, "sorry, that domain isn't in my list of allowed rcpthosts", False),
+        (450, "4.1.1 Recipient address verification in progress", False),  # temporary
+        (550, "4.1.1 inconsistent", False),
+        (None, "5.1.1 no such user", False),
+    ],
+)
+def test_bounces(code, text, bounce):
+    assert _bounced(code, text) is bounce
+
+
+def test_enhanced_status():
+    assert _enhanced_status("5.1.10 RESOLVER.ADR.RecipientNotFound") == "5.1.10"
+    assert _enhanced_status("  4.7.1 Greylisted") == "4.7.1"
+    assert _enhanced_status("User unknown") is None
+    assert _enhanced_status("") is None

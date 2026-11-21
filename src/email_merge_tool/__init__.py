@@ -27,7 +27,7 @@ from .data import (  # noqa: E402
 from .experiment import Assignment, assign_variants, write_assignments  # noqa: E402
 from .merge import MergeReport, Result, mail_merge  # noqa: E402
 from .message import build_message, wire_bytes  # noqa: E402
-from .sendlog import read_log, sent_addresses  # noqa: E402
+from .sendlog import bounced_addresses, read_log, sent_addresses  # noqa: E402
 from .templates import (  # noqa: E402
     RenderedMessage,
     Template,
@@ -77,6 +77,7 @@ __all__ = [
     "wire_bytes",
     "read_log",
     "sent_addresses",
+    "bounced_addresses",
     "PRESETS",
     "SMTPConfig",
     "SMTPTransport",

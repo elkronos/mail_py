@@ -3,10 +3,12 @@
 ## The send log
 
 With `log_path=` (`--log`), every recipient considered in a real send gets one
-JSON line: `timestamp`, `to`, `status` (`sent`, `failed`, `uncertain` or `skipped`),
-`variant`, `message_id`, `detail` and `seed`. Lines are flushed and
-`fsync`-ed as they are written, so the log survives a crash or power loss. Dry
-runs don't write to the log.
+JSON line: `timestamp`, `to`, `status` (`sent`, `failed`, `bounced`,
+`uncertain` or `skipped`), `variant`, `message_id`, `detail`, `smtp_code`,
+`enhanced_status` and `seed`. `smtp_code` and `enhanced_status` hold the
+server's reply behind a failure or bounce, such as `550` and `"5.1.1"`, and
+are `null` otherwise. Lines are flushed and `fsync`-ed as they are written, so
+the log survives a crash or power loss. Dry runs don't write to the log.
 
 **Use one log file per mailing.** The log records *who has received this
 mailing*. Reusing it for a different mailing would skip everyone from the
@@ -31,7 +33,10 @@ email-merge ... --send --log invite.jsonl --resume
 ```
 
 Recipients with a `sent` or `uncertain` line are skipped, and `failed` ones
-are tried again.
+are tried again. Addresses with a `bounced` line are skipped too: mailing a
+mailbox that doesn't exist again harms the sender's reputation. Add
+`--retry-bounced` (`retry_bounced=True`) to send to them anyway, for example
+after the recipients' server was fixed.
 Matching is by (normalized) **address**, not by row number, so resume stays
 correct even if you've sorted, filtered or appended to the CSV in the
 meantime. Tools that resume "from row N" can silently skip or repeat people
@@ -42,6 +47,14 @@ garbled, or you press Ctrl-C after its content was sent but before the server
 confirmed it. The server may have delivered it,
 so it is not retried and `--resume` skips it. Check those recipients yourself,
 for example in your provider's Sent folder.
+
+A message is logged `bounced` when the server refuses the recipient's
+mailbox for good: enhanced status `5.1.x` (an unknown or invalid address,
+except `5.1.7` and `5.1.8`, which are about the sender), `5.2.1` (a disabled
+mailbox), or a plain `550` reply that says the user is unknown. Other
+permanent refusals, such as a full mailbox (`5.2.2`) or a policy or spam
+refusal (`5.7.x`), are `failed`, and resume tries them again. Bounces reported
+later by email (after the server accepted the message) never reach the log.
 
 The only remaining duplicate risk is a crash in the instant after the server
 accepts a message and before its log line is written. That's at most one

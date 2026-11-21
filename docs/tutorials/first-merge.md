@@ -83,13 +83,14 @@ printing one line per recipient:
 ```text
     sent  ann.lee@example.org
     sent  bo.chen@example.org
-  failed  carmen.diaz@example.org (recipient refused: carmen.diaz@example.org (550 5.1.1 mailbox unavailable))
+ bounced  carmen.diaz@example.org (recipient refused: carmen.diaz@example.org (550 5.1.1 mailbox unavailable))
 
-Done: sent: 2, failed: 1.
+Done: sent: 2, bounced: 1.
 ```
 
-A permanent failure for one recipient (such as an unknown mailbox) doesn't
-stop the run. Temporary failures (4xx replies, dropped connections) are retried
+A permanent failure for one recipient doesn't stop the run. An unknown
+mailbox, like Carmen's, is logged as `bounced`, and `--resume` won't mail that
+address again. Temporary failures (4xx replies, dropped connections) are retried
 with backoff, up to the point where the message has been sent; a connection
 lost after that is logged as `uncertain` rather than risking a second copy. A
 failed login stops the run immediately, with advice, and so does a reply

@@ -8,6 +8,8 @@
 - `mail_merge(max_consecutive_failures=5)` and `email-merge --max-failures N` stop a run after N failed messages in a row; refusals of unknown addresses or full mailboxes (`5.1.x`, `5.2.x`) do not count, and `0` turns the check off. After a stop mid-run, the CLI says to re-run with `--resume`.
 - `PermanentSendError` and `AccountRefusedError` carry the server's reply as `smtp_code` and `smtp_error`.
 - Every `FatalSendError` raised by `mail_merge` carries the partial `MergeReport` as `exc.report`, so a caller without a log can tell who was sent the message before the stop. The CLI prints how far a stopped run got. Sending without a log adds a warning to the report.
+- New status `bounced` for a recipient whose mailbox the server refuses for good: enhanced status `5.1.x` (not `5.1.7`/`5.1.8`), `5.2.1`, or a `550` that says the user is unknown. Resume skips bounced addresses unless `retry_bounced=True` (`--retry-bounced`), so a re-run no longer mails dead mailboxes again. `MergeReport.bounced`, `bounced_addresses()` and `sendlog.BOUNCED_STATUSES` are new, the summary counts bounces, and the CLI exits with 1 when any address bounced.
+- `Result` and every log record have `smtp_code` and `enhanced_status`, the server's reply behind a failure or bounce (such as `550` and `"5.1.1"`), so logs can be filtered without parsing `detail`.
 - New `TransportError` (a `FatalSendError`): an exception from a transport that is not one of the send errors stops the run with it, keeps the original as `__cause__`, and logs the message being sent as `uncertain`. Such exceptions used to escape unlogged and without the report.
 
 ### Fixed

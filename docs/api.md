@@ -75,3 +75,5 @@ Everything below can be imported from `email_merge_tool`.
 ::: email_merge_tool.read_log
 
 ::: email_merge_tool.sent_addresses
+
+::: email_merge_tool.bounced_addresses
