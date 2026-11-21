@@ -21,7 +21,7 @@ from .data import (
     validate_recipients,
 )
 from .experiment import Assignment, assign_variants, write_assignments
-from .message import build_message, wire_bytes
+from .message import attachment_name, build_message, wire_bytes
 from .sendlog import SendLog, sent_addresses
 from .templates import Template, TemplateError, fill, load_template, placeholders
 from .transport import (
@@ -264,6 +264,10 @@ def mail_merge(
     for path in attachments:
         if not Path(path).is_file():
             issues.append(Issue(None, "error", f"attachment not found: {path}"))
+    shared_names = [attachment_name(p) for p in attachments]
+    clash = _repeated_name(shared_names, 0)
+    if clash:
+        issues.append(Issue(None, "warning", _clash_note(clash), where="attachments"))
     if variant_field and not any(i.severity == "error" for i in issues):
         for row, record in enumerate(records, start=1):
             if record[variant_field] not in tpls:
@@ -292,6 +296,7 @@ def mail_merge(
         variants = [next(iter(tpls))] * len(records)
 
     built: list[tuple[str, str, EmailMessage]] = []
+    row_warnings: list[Issue] = []
     for row, (record, variant) in enumerate(zip(records, variants, strict=True), start=1):
         try:
             rendered = tpls[variant].render(record, to_field=to_field)
@@ -305,6 +310,11 @@ def mail_merge(
             missing = [str(p) for p in files if not p.is_file()]
             if missing:
                 raise TemplateError(f"attachment not found: {', '.join(missing)}")
+            clash = _repeated_name(
+                shared_names + [attachment_name(p) for p in files[len(attachments) :]], len(attachments)
+            )
+            if clash:
+                row_warnings.append(Issue(row, "warning", _clash_note(clash)))
             message = build_message(
                 rendered,
                 sender=sender or "",
@@ -322,6 +332,9 @@ def mail_merge(
         built.append((rendered.to, variant, message))
     if errors:
         raise DataError(_describe(errors), errors)
+    for issue in row_warnings:
+        logger.warning("%s", issue)
+    report.issues += row_warnings
 
     if not resume:
         already = set()
@@ -454,6 +467,16 @@ def _reuse_issue(path: Path, logged: set[str]) -> Issue:
         "(--resume, or resume=True), or use a new log file for a new mailing",
         where="send log",
     )
+
+
+def _repeated_name(names: Sequence[str], start: int) -> str | None:
+    """The first of ``names[start:]`` that appears twice, ignoring case, or None."""
+    folded = [n.casefold() for n in names]
+    return next((names[i] for i in range(start, len(names)) if folded.count(folded[i]) > 1), None)
+
+
+def _clash_note(name: str) -> str:
+    return f"two attachments are named {name!r}; mail clients rename one of them or save one over the other"
 
 
 def _check_writable(message: EmailMessage) -> None:

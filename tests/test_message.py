@@ -18,7 +18,7 @@ from email_merge_tool import (
     build_message,
     mail_merge,
 )
-from email_merge_tool.message import needs_smtputf8, wire_bytes
+from email_merge_tool.message import attachment_name, needs_smtputf8, wire_bytes
 from email_merge_tool.templates import RenderedMessage
 
 SENDER = "Study Team <team@example.org>"
@@ -211,3 +211,84 @@ def test_long_subjects_round_trip_within_the_line_limit():
         wire = wire_bytes(message)
         assert all(len(line) <= 76 for line in header_lines(wire, "Subject"))
         assert message_from_bytes(wire, policy=policy.default)["Subject"] == subject
+
+
+def attach(tmp_path, name, data=b"%PDF-1.4"):
+    path = tmp_path / name
+    path.write_bytes(data)
+    message = build_message(rendered(), sender=SENDER, attachments=[path])
+    wire = wire_bytes(message)
+    (part,) = message_from_bytes(wire, policy=policy.default).iter_attachments()
+    return wire, part
+
+
+def test_eml_and_text_attachments(tmp_path):
+    forwarded = b"From: a@example.org\r\nSubject: old\r\n\r\nbody\r\n"
+    _, part = attach(tmp_path, "forward.eml", forwarded)
+    assert part.get_content_type() == "application/octet-stream"  # message/rfc822 may not be base64
+    assert part.get_content() == forwarded
+    wire, part = attach(tmp_path, "list.csv", "name\nZoë\n".encode())
+    assert b'Content-Type: text/csv; charset="utf-8"; name="list.csv"' in wire
+    assert part.get_content() == "name\nZoë\n"
+    wire, part = attach(tmp_path, "legacy.txt", "Zoë\n".encode("latin-1"))
+    assert b"charset" not in wire.split(b"legacy.txt")[0].rsplit(b"Content-Type", 1)[1]
+    assert part.get_payload(decode=True) == "Zoë\n".encode("latin-1")
+
+
+@pytest.mark.parametrize(
+    ("suffix", "ctype"),
+    [(".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"), (".ics", "text/calendar")],
+)
+def test_attachment_types_do_not_depend_on_the_machine(tmp_path, suffix, ctype):
+    assert attach(tmp_path, "file" + suffix)[1].get_content_type() == ctype
+
+
+def test_long_ascii_attachment_name_is_one_plain_parameter(tmp_path):
+    name = "Quarterly_report_for_the_Department_of_Environmental_and_Occupational_Health_Sciences_2026_final.pdf"
+    wire, part = attach(tmp_path, name)
+    assert header_lines(wire, "Content-Disposition") == [
+        b"Content-Disposition: attachment;",
+        f' filename="{name}"'.encode(),
+    ]
+    assert f'Content-Type: application/pdf;\r\n name="{name}"\r\n'.encode() in wire
+    assert b"filename*" not in wire
+    assert part.get_filename() == name
+
+
+def test_non_ascii_attachment_name_has_both_forms(tmp_path):
+    name = "Résumé – 2026.pdf"
+    wire, part = attach(tmp_path, name)
+    assert b"filename*=utf-8''R%C3%A9sum%C3%A9%20%E2%80%93%202026.pdf" in wire
+    assert b'name="=?utf-8?b?UsOpc3Vtw6kg4oCTIDIwMjYucGRm?="' in wire
+    assert part.get_filename() == name
+
+
+def test_attachment_name_cannot_inject_a_header(tmp_path):
+    name = "=?utf-8?q?=0D=0ABcc:_e@evil.org?=.pdf"  # the stdlib decodes this into a line break
+    wire, part = attach(tmp_path, name)
+    assert b"\r\nBcc" not in wire
+    assert part.get_filename() == name
+    assert attachment_name("bell\x07and​space.txt") == "bell_and_space.txt"
+
+
+def test_duplicate_attachment_names_warn(people, tmp_path):
+    for folder in ("a", "b"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "report.pdf").write_bytes(b"%PDF")
+    shared = mail_merge(TPL, people, sender=SENDER, attachments=[tmp_path / "a/report.pdf", tmp_path / "b/report.pdf"])
+    assert [str(i) for i in shared.issues] == [
+        "warning: attachments: two attachments are named 'report.pdf'; "
+        "mail clients rename one of them or save one over the other"
+    ]
+    rows = [dict(p, cert=str(tmp_path / ("b" if p["id"] == "2" else "a") / "Report.PDF")) for p in people]
+    for folder in ("a", "b"):
+        (tmp_path / folder / "report.pdf").rename(tmp_path / folder / "Report.PDF")
+    (tmp_path / "report.pdf").write_bytes(b"%PDF")
+    per_row = mail_merge(TPL, rows, sender=SENDER, attachments=[tmp_path / "report.pdf"], attachment_field="cert")
+    assert [(i.row, i.severity) for i in per_row.issues] == [
+        (1, "warning"),
+        (2, "warning"),
+        (3, "warning"),
+        (4, "warning"),
+    ]
+    assert "'Report.PDF'" in per_row.issues[0].message

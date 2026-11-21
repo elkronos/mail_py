@@ -23,6 +23,7 @@
 - Quoted-printable lines are at most 76 characters, as RFC 2045 requires; they were 78.
 - Each text part's transfer encoding follows fixed rules instead of the standard library's guess. ASCII text is `7bit`, or quoted-printable when a line is longer than 76 characters, and is never base64; an ASCII newsletter with `=====` rules used to go out as base64, which rspamd penalizes. Other text is quoted-printable or base64, whichever is shorter. Bodies are never `8bit`.
 - A non-ASCII subject is written as RFC 2047 encoded words by the tool, with the same bytes on every Python version. Python 3.10 to 3.12 dropped a space when folding long subjects with emoji or accented names, so recipients saw words run together.
+- Attachments: `.eml` files go as `application/octet-stream` instead of a base64 `message/rfc822`, which RFC 2046 forbids. UTF-8 text files are labelled `charset="utf-8"`, so accented names in a CSV display correctly. Types come from a table in the tool, so `.docx` or `.xlsx` no longer arrive as `application/octet-stream` on machines without a system type table. ASCII file names are one plain `filename=` parameter at any length, and non-ASCII names add an RFC 2047 `name=`; older clients showed both kinds as "part1". A file name can no longer put a line break into a header. Two attachments with the same name produce a warning.
 
 ### Changed
 - With `--security none`, `--port` defaults to 25 instead of 587.

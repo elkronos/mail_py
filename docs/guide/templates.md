@@ -82,6 +82,28 @@ library, whose choices differ between Python versions.
 - **List-Unsubscribe** is written exactly as given; see
   [deliverability](deliverability.md).
 
+## Attachments
+
+`attachments=[...]` (`--attach FILE`) adds files to every message, and
+`attachment_field="column"` (`--attachment-field COLUMN`) adds each row's own
+files. Paths in that column are separated by `;` and may contain placeholders.
+
+- **Type:** from the file extension, using a table built into the tool, so a
+  file gets the same type on every machine and Python version (`.pdf`,
+  `.docx`, `.xlsx`, `.ics`, images, archives and so on). Unknown extensions are
+  sent as `application/octet-stream`, and so are `.eml` files, so a forwarded
+  message arrives byte for byte.
+- **Text files** such as `.csv`, `.txt` and `.ics` that are valid UTF-8 are
+  labelled `charset="utf-8"`, so accented characters display correctly.
+- **File name:** the file's own name, with control characters, quotes,
+  backslashes and slashes replaced by `_`. An ASCII name is written as one
+  plain `filename="..."` parameter at any length. Other names are written as
+  RFC 2231 `filename*=utf-8''...`, with an RFC 2047 `name=` on the
+  Content-Type for older clients.
+- **Duplicate names:** two attachments with the same name (ignoring case) in
+  one message produce a warning, since mail clients then rename one of them or
+  save one over the other.
+
 ## Text and HTML together
 
 ```python

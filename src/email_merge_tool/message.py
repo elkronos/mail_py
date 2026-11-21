@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import base64
 import copy
+import functools
 import io
 import mimetypes
 import quopri
 import re
+import unicodedata
+import urllib.parse
 from collections.abc import Sequence
 from email.errors import MessageError
 from email.generator import BytesGenerator
@@ -21,7 +24,7 @@ from typing import Any
 
 from .templates import RenderedMessage
 
-__all__ = ["POLICY", "build_message", "needs_smtputf8", "wire_bytes"]
+__all__ = ["POLICY", "attachment_name", "attachment_type", "build_message", "needs_smtputf8", "wire_bytes"]
 
 # RFC 5322 section 2.1.1: a header line, name included, may not exceed 998 characters.
 _MAX_LINE = 998
@@ -86,6 +89,128 @@ def _verbatim_header(name: str, tokens: Sequence[str]) -> BaseHeader:
     header = cls(name, value)
     header._tokens = tuple(tokens)  # type: ignore[attr-defined]
     return header
+
+
+# Attachment types by file extension, so a file gets the same type on every
+# machine and Python version. Other extensions fall back to the standard
+# library's built-in table (never the system's mime.types), then to
+# application/octet-stream.
+_ATTACHMENT_TYPES = {
+    ".7z": "application/x-7z-compressed",
+    ".avif": "image/avif",
+    ".bmp": "image/bmp",
+    ".csv": "text/csv",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    # message/rfc822 may not be base64-encoded (RFC 2046 section 5.2.1), and
+    # rewriting the attached message to 7bit would change it.
+    ".eml": "application/octet-stream",
+    ".epub": "application/epub+zip",
+    ".gif": "image/gif",
+    ".gz": "application/gzip",
+    ".heic": "image/heic",
+    ".htm": "text/html",
+    ".html": "text/html",
+    ".ics": "text/calendar",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".json": "application/json",
+    ".m4a": "audio/mp4",
+    ".md": "text/markdown",
+    ".mov": "video/quicktime",
+    ".mp3": "audio/mpeg",
+    ".mp4": "video/mp4",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".rar": "application/vnd.rar",
+    ".rtf": "application/rtf",
+    ".svg": "image/svg+xml",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".tsv": "text/tab-separated-values",
+    ".txt": "text/plain",
+    ".wav": "audio/wav",
+    ".webp": "image/webp",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xml": "application/xml",
+    ".zip": "application/zip",
+}
+
+# RFC 2231 attribute characters that need no percent-encoding.
+_ATTR_CHARS = "!#$&+-.^_`|~"
+
+
+def attachment_name(path: str | Path) -> str:
+    """The file name an attachment is sent under.
+
+    It is the file's own name with control characters, quotes, backslashes and
+    slashes replaced by ``_``, so a name cannot break the header it is written
+    in or point into a directory when the recipient saves it.
+    """
+    name = Path(path).name
+    return "".join("_" if unicodedata.category(c) in ("Cc", "Cf") or c in '"\\/' else c for c in name)
+
+
+@functools.cache
+def _builtin_types() -> mimetypes.MimeTypes:
+    return mimetypes.MimeTypes()  # the standard library's own table, without the system's files
+
+
+def attachment_type(name: str) -> str:
+    """The MIME type an attachment named ``name`` is sent as."""
+    suffix = Path(name).suffix.lower()
+    if suffix in _ATTACHMENT_TYPES:
+        return _ATTACHMENT_TYPES[suffix]
+    ctype, encoding = _builtin_types().guess_type(name)
+    if ctype is None or encoding is not None:  # unknown, or compressed (e.g. .tar.bz2)
+        return "application/octet-stream"
+    return ctype
+
+
+def _attach(msg: EmailMessage, data: bytes, name: str) -> None:
+    """Attach ``data`` as ``name``, with plain parameters when the name allows.
+
+    The standard library writes a long or non-ASCII file name only in RFC 2231
+    pieces (``filename*0*=``), which older clients show as "part1". An ASCII
+    name is written as a plain quoted ``filename=`` and ``name=``. Any other
+    name is a single ``filename*=utf-8''...`` (RFC 2231) plus an RFC 2047
+    ``name=`` on the Content-Type, which is what Thunderbird sends.
+    """
+    ctype = attachment_type(name)
+    maintype, subtype = ctype.split("/", 1)
+    msg.add_attachment(data, maintype=maintype, subtype=subtype)
+    *_, part = msg.iter_parts()
+    params = [f"{ctype};"]
+    if maintype == "text":
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        else:
+            params.append('charset="utf-8";')
+    if name.isascii() and name.isprintable() and "=?" not in name:
+        params.append(f'name="{name}"')
+        filename = f'filename="{name}"'
+    else:
+        words = []
+        encoded = name.encode("utf-8")
+        position = 0
+        while position < len(encoded):
+            end = min(position + 45, len(encoded))
+            while end < len(encoded) and encoded[end] & 0xC0 == 0x80:  # not inside a character
+                end -= 1
+            words.append(f"=?utf-8?b?{base64.b64encode(encoded[position:end]).decode('ascii')}?=")
+            position = end
+        params.append(f'name="{" ".join(words)}"')
+        filename = "filename*=utf-8''" + urllib.parse.quote(name, safe=_ATTR_CHARS)
+    part.replace_header("Content-Type", _verbatim_header("Content-Type", params))
+    part.replace_header("Content-Disposition", _verbatim_header("Content-Disposition", ["attachment;", filename]))
 
 
 def _encoded_subject(subject: str) -> BaseHeader:
@@ -178,8 +303,9 @@ def build_message(
             List-Unsubscribe=One-Click`` (RFC 8058). Only valid when
             ``list_unsubscribe`` contains an ``https:`` URI, and it only works
             if your provider DKIM-signs the message.
-        attachments: Files to attach. The MIME type is guessed from the file
-            extension (``application/octet-stream`` if unknown).
+        attachments: Files to attach. The MIME type comes from the file
+            extension (see :func:`attachment_type`), and text files that are
+            valid UTF-8 are labelled ``charset="utf-8"``.
     """
     msg = EmailMessage(policy=POLICY)
     from_value = rendered.headers.get("From") or sender
@@ -207,12 +333,7 @@ def build_message(
     if rendered.html is not None:
         msg.add_alternative(rendered.html, subtype="html", cte=_transfer_encoding(rendered.html))
     for item in attachments:
-        path = Path(item)
-        ctype, encoding = mimetypes.guess_type(path.name)
-        if ctype is None or encoding is not None:  # unknown, or compressed (e.g. .tar.gz)
-            ctype = "application/octet-stream"
-        maintype, subtype = ctype.split("/", 1)
-        msg.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name)
+        _attach(msg, Path(item).read_bytes(), attachment_name(item))
     return msg
 
 
