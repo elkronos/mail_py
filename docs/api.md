@@ -52,6 +52,8 @@ Everything below can be imported from `email_merge_tool`.
 
 ::: email_merge_tool.SMTPConfig
 
+::: email_merge_tool.Transport
+
 ::: email_merge_tool.SMTPTransport
 
 ::: email_merge_tool.DryRunTransport
@@ -69,6 +71,8 @@ Everything below can be imported from `email_merge_tool`.
 ::: email_merge_tool.AccountRefusedError
 
 ::: email_merge_tool.TransportError
+
+::: email_merge_tool.EmailMergeError
 
 ## Send log
 

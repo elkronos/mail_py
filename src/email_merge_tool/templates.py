@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
+from .errors import EmailMergeError
+
 __all__ = [
     "ADDRESS_HEADERS",
     "ALLOWED_HEADERS",
@@ -80,7 +82,7 @@ _OWNED_HEADERS = {
 _FIELD_NAME = re.compile(r"[!-9;-~]+")
 
 
-class TemplateError(ValueError):
+class TemplateError(EmailMergeError, ValueError):
     """Raised for malformed templates or values that cannot be rendered."""
 
 

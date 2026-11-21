@@ -16,6 +16,8 @@ from email.headerregistry import Address
 from email.utils import getaddresses
 from pathlib import Path
 
+from .errors import EmailMergeError
+
 __all__ = [
     "Issue",
     "DataError",
@@ -49,7 +51,7 @@ _LINE_BREAK = re.compile(r"\r\n|\r|\n")
 _ADDRESS_LIST_SUFFIXES = {".txt", ".csv", ".json"}
 
 
-class DataError(ValueError):
+class DataError(EmailMergeError, ValueError):
     """Raised when recipient data cannot be loaded or fails validation."""
 
     def __init__(self, message: str, issues: Sequence[Issue] = ()) -> None:

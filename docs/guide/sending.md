@@ -144,8 +144,10 @@ report = mail_merge(
 print(report.summary())
 ```
 
-To deliver another way (an HTTP API, a queue), write a class with `open()`,
-`send(message)` and `close()` methods and pass it as `transport`.
+A transport is used only with `dry_run=False`. Passing one to a dry run adds
+a warning that it isn't used. To choose where a dry run writes its `.eml`
+files, pass `transport=DryRunTransport("outbox")` (or `output_dir="outbox"`);
+a run with `DryRunTransport` is always a dry run and writes no log.
 
 ### When a run stops part-way
 
@@ -176,3 +178,43 @@ without a log, a run that stops part-way cannot be resumed. The command line
 asks for `--log FILE` or an explicit `--no-log`, and when a run stops it
 prints how far it got, such as `Stopped after 214 of 600 recipient(s): sent:
 212, failed: 1, skipped: 1`.
+
+## Custom transports
+
+To deliver another way, such as an HTTP email API or a queue, pass any object
+with `open()`, `send(message)` and `close()` methods as `transport=`. The
+`Transport` protocol in the [API reference](../api.md) describes it.
+`mail_merge` calls `open()` once before the first message and `close()` once
+at the end, also when the run stops with an error. `send(message)` gets one
+`EmailMessage` and delivers it to the addresses in its `To`, `Cc` and `Bcc`
+headers. `wire_bytes(message)` gives the bytes SMTP would transmit, without
+the `Bcc` header.
+
+What `send` returns or raises decides the recipient's status:
+
+| `send` | Means | Status | The run |
+| --- | --- | --- | --- |
+| returns `None` (or `{}`) | delivered | `sent` | continues |
+| returns `{address: (code, reply)}` | delivered, except to these recipients | `sent`; `failed` or `bounced` if the row's `To` is among them | continues |
+| raises `PermanentSendError` | this message was not delivered | `failed`; `bounced` for a mailbox refusal | continues |
+| raises `UncertainSendError` | the request went out but the answer was lost | `uncertain`, never sent again | continues |
+| raises `FatalSendError` or `AccountRefusedError` | nothing more can be sent (a bad key, a quota) | `failed`, sent by `--resume` | stops |
+| raises anything else | a bug or an unhandled case | `uncertain` | stops with `TransportError` |
+
+Other return values, such as a provider's response object, are ignored, and
+so are entries of a returned mapping that aren't `(code, reply)` pairs.
+Pass a provider's bounce as `PermanentSendError(text, smtp_code=550,
+smtp_error="5.1.1 ...")` to have it recorded as `bounced`. `mail_merge`
+doesn't retry anything itself, so `send` should retry throttling and
+connection errors that happened before the request went out. A transport that
+only previews sets `delivers = False`, like `DryRunTransport`, and every run
+with it is a dry run.
+
+This transport posts each message to an HTTP API (the endpoint and fields are
+placeholders) and maps each outcome to the table above. It is in the
+repository as `examples/http_transport.py`, and the test suite runs it against
+a local server.
+
+```python
+--8<-- "examples/http_transport.py"
+```

@@ -185,7 +185,11 @@ def mail_merge(
         recipients: CSV/JSON path, list of dicts, or pandas DataFrame.
         sender: From address (``"Name <addr>"``). Required unless every
             template sets ``From:``.
-        transport: e.g. ``SMTPTransport(SMTPConfig.from_service("gmail", user, pw))``.
+        transport: e.g. ``SMTPTransport(SMTPConfig.from_service("gmail", user, pw))``,
+            or your own; see :class:`Transport`. It is used only with
+            ``dry_run=False``, and a warning says so otherwise. A transport
+            whose ``delivers`` attribute is false, such as
+            :class:`DryRunTransport`, makes the run a dry run either way.
         dry_run: Build and validate all messages without sending (default).
         to_field: Column holding each recipient's address.
         seed: Random seed for assigning variants. Record it with your results.
@@ -223,7 +227,8 @@ def mail_merge(
         attachment_field: Column with per-recipient file path(s), separated
             by ``;`` (e.g. a personalised certificate). Paths may contain
             placeholders. Relative paths are resolved from the working directory.
-        output_dir: In a dry run, also write each message as a ``.eml`` file here.
+        output_dir: In a dry run, also write each message as a ``.eml`` file
+            here (or pass ``transport=DryRunTransport(output_dir)``, not both).
         progress: Called with each :class:`Result` as it is produced.
         max_consecutive_failures: Stop the run with :class:`FatalSendError`
             after this many failed messages in a row (default 5; ``0`` never
@@ -260,6 +265,10 @@ def mail_merge(
         raise ValueError("retry_bounced=True needs resume=True: only a resumed run skips bounced addresses")
     if not dry_run and transport is None:
         raise ValueError("dry_run=False needs a transport (e.g. SMTPTransport)")
+    previewer = transport is not None and not getattr(transport, "delivers", True)
+    if previewer and output_dir is not None:
+        raise ValueError("pass output_dir= or a DryRunTransport, not both: each says where the dry run writes")
+    dry_run = dry_run or previewer
     if seed is not None and variant_field is not None:
         raise ValueError("use either seed (random assignment) or variant_field (pre-assigned), not both")
     if len(tpls) > 1 and seed is None and variant_field is None:
@@ -305,6 +314,16 @@ def mail_merge(
             bounced = bounced_addresses(log_path)
     if sender and not is_valid_address(sender):
         issues.insert(0, Issue(None, "error", f"invalid sender address {sender!r}"))
+    if dry_run and transport is not None and not previewer:
+        issues.append(
+            Issue(
+                None,
+                "warning",
+                f"{type(transport).__name__} is not used: this is a dry run (dry_run=True is the default), "
+                "so nothing is sent; pass dry_run=False to send",
+                where="transport",
+            )
+        )
     if not dry_run and log_path is None:
         issues.append(
             Issue(
@@ -426,7 +445,9 @@ def mail_merge(
             already = current
             bounced = set() if retry_bounced else bounced_addresses(log_path)
 
-    active: Transport = transport if (transport is not None and not dry_run) else DryRunTransport(output_dir)
+    active: Transport = DryRunTransport(output_dir)
+    if transport is not None and (previewer or not dry_run):
+        active = transport
     delivered = attempted = 0
     consecutive = 0  # failed messages in a row, not counting bad addresses
     finished = False
@@ -641,7 +662,7 @@ def _deliver(
     message_id = str(message["Message-ID"])
     stamp_date(message)  # the send time, not the build time, which can be hours earlier
     try:
-        refused = transport.send(message)
+        returned = transport.send(message)
     except UncertainSendError as exc:
         logger.warning("delivery to %s is uncertain: %s", to, exc)
         code, text = _error_reply(exc)
@@ -658,19 +679,36 @@ def _deliver(
         raise TransportError(
             f"the transport raised {_exception_text(exc)}; the message may or may not have been sent"
         ) from exc
-    refused = refused if isinstance(refused, Mapping) else {}
+    refused = _refusals(returned)
     key = normalize_address(to)
     mine = {address: reply for address, reply in refused.items() if normalize_address(address) == key}
     if mine:  # a Cc or Bcc took it, but the person this row is for did not
         detail = f"recipient refused: {_describe_refused(mine)}; the other recipients were sent the message"
-        reply = next(iter(mine.values()))
-        code, text = (reply[0], _text(reply[1])) if isinstance(reply, tuple) and len(reply) == 2 else (None, "")
-        code = code if isinstance(code, int) else None
+        code, text = next(iter(mine.values()))
         status = "bounced" if _bounced(code, text) else "failed"
         logger.warning("%s: %s: %s", status, to, detail)
         return Result(to, status, variant, message_id, detail, code, _enhanced_status(text)), not _mailbox_problem(text)
     detail = f"some recipients refused: {_describe_refused(refused)}" if refused else ""
     return Result(to, "dry_run" if dry_run else "sent", variant, message_id, detail), False
+
+
+def _refusals(returned: object) -> dict[str, tuple[int, str]]:
+    """The refused recipients in what ``send`` returned: the ``{address: (code, reply)}`` entries.
+
+    Other values, such as a provider's response, and entries of another
+    shape say nothing about refusals.
+    """
+    if not isinstance(returned, Mapping):
+        return {}
+    return {
+        address: (reply[0], _text(reply[1]))
+        for address, reply in returned.items()
+        if isinstance(address, str)
+        and isinstance(reply, tuple)
+        and len(reply) == 2
+        and isinstance(reply[0], int)
+        and isinstance(reply[1], (bytes, str))
+    }
 
 
 def _describe(errors: Sequence[Issue], shown: int = 20) -> str:

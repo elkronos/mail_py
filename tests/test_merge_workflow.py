@@ -715,3 +715,54 @@ def test_a_dry_run_resume_shows_bounced_addresses_as_skipped(people, tmp_path):
     assert [r.status for r in report.results] == ["skipped", "skipped", "dry_run", "dry_run"]
     again = mail_merge(TPL, people, sender=SENDER, log_path=log, resume=True, retry_bounced=True)
     assert [r.status for r in again.results] == ["skipped", "dry_run", "dry_run", "dry_run"]
+
+
+def test_only_refusal_entries_count_as_refused(people):
+    class Provider:
+        def open(self):
+            pass
+
+        def send(self, message):
+            if message["To"] == "ann@example.org":
+                return {"id": "prov-123", "status": "queued"}  # a provider's receipt
+            if message["To"] == "bo@example.org":
+                return "prov-456"
+            return {"MessageId": "x", "lee@example.org": (550, b"5.1.1 no such user")}
+
+        def close(self):
+            pass
+
+    report = mail_merge(TPL, people[:3], sender=SENDER, dry_run=False, transport=Provider())
+    assert [(r.status, r.detail) for r in report.results] == [
+        ("sent", ""),
+        ("sent", ""),
+        ("sent", "some recipients refused: lee@example.org (550 5.1.1 no such user)"),
+    ]
+
+
+def test_a_dry_run_transport_makes_a_dry_run(people, tmp_path):
+    from email_merge_tool import DryRunTransport
+
+    log = tmp_path / "log.jsonl"
+    outbox = DryRunTransport(tmp_path / "outbox")
+    report = mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=outbox, log_path=log)
+    assert report.count("dry_run") == 4 and report.sent == 0
+    assert not log.exists()  # nothing was sent, so nothing is logged
+    assert len(list((tmp_path / "outbox").glob("*.eml"))) == 4 and len(outbox.messages) == 4
+
+    preview = DryRunTransport()
+    report = mail_merge(TPL, people, sender=SENDER, transport=preview)  # used in the default dry run too
+    assert len(preview.messages) == 4 and not any(i.where == "transport" for i in report.issues)
+    with pytest.raises(ValueError, match="output_dir= or a DryRunTransport, not both"):
+        mail_merge(TPL, people, sender=SENDER, transport=DryRunTransport(), output_dir=tmp_path / "x")
+
+
+def test_the_transport_contract_is_exported():
+    from email_merge_tool import DryRunTransport, EmailMergeError, PermanentSendError, TemplateError, Transport
+
+    assert isinstance(gmail(), Transport) and isinstance(DryRunTransport(), Transport)
+    assert not isinstance(object(), Transport)
+    for error in (DataError("x"), TemplateError("x"), PermanentSendError("x"), FatalSendError("x")):
+        assert isinstance(error, EmailMergeError)
+    assert isinstance(DataError("x"), ValueError) and isinstance(TemplateError("x"), ValueError)
+    assert issubclass(TransportError, FatalSendError) and issubclass(AccountRefusedError, EmailMergeError)

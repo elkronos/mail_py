@@ -9,6 +9,7 @@ after `pip install -e .`:
 | [`01_quickstart`](01_quickstart) | One text template, a CSV, a dry run (Python and CLI). |
 | [`02_html_newsletter`](02_html_newsletter) | Text + HTML alternative, inline CSS, per-recipient unsubscribe link. |
 | [`03_survey_experiment`](03_survey_experiment) | A randomized, stratified invitation experiment, a reminder wave that excludes responders, and the analysis. |
+| [`http_transport.py`](http_transport.py) | A custom transport for an HTTP email API, following the transport contract (not run offline; see "Custom transports" in the sending guide). |
 
 ```bash
 python examples/01_quickstart/run.py

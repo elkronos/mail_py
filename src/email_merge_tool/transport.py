@@ -14,8 +14,9 @@ from email.errors import MessageError
 from email.message import EmailMessage, Message
 from email.utils import getaddresses
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TextIO
+from typing import TYPE_CHECKING, Any, Protocol, TextIO, runtime_checkable
 
+from .errors import EmailMergeError
 from .message import wire_bytes
 
 if TYPE_CHECKING:
@@ -47,7 +48,7 @@ PRESETS: dict[str, tuple[str, int, str]] = {
 }
 
 
-class PermanentSendError(Exception):
+class PermanentSendError(EmailMergeError):
     """This one message cannot be delivered (e.g. 5xx: recipient rejected).
 
     Attributes:
@@ -69,7 +70,7 @@ class UncertainSendError(PermanentSendError):
     """
 
 
-class FatalSendError(Exception):
+class FatalSendError(EmailMergeError):
     """The run cannot continue (e.g. authentication failed).
 
     Attributes:
@@ -156,12 +157,42 @@ class SMTPConfig:
         )
 
 
+@runtime_checkable
 class Transport(Protocol):
-    """Anything that can deliver an :class:`EmailMessage`."""
+    """What :func:`~email_merge_tool.mail_merge` needs from a transport, built in or your own.
+
+    ``open()`` is called once before the first message and ``close()`` once
+    at the end, also when the run stops with an error. ``send(message)``
+    delivers one message to the addresses in its ``To``, ``Cc`` and ``Bcc``
+    headers; :func:`~email_merge_tool.wire_bytes` gives the bytes SMTP would
+    transmit, without ``Bcc``. What ``send`` does sets the recipient's status:
+
+    * Return ``None`` (or an empty mapping): delivered, ``sent``.
+    * Return ``{address: (code, reply)}``: delivered to everyone except these
+      recipients. The row is ``sent``, or ``failed``/``bounced`` when its
+      ``To`` address is among them. Entries of another shape, and return
+      values that are not mappings (such as a provider's response), are
+      ignored.
+    * Raise :class:`PermanentSendError`: this message was not delivered; the
+      run goes on. Pass the reply as ``smtp_code=`` and ``smtp_error=`` so a
+      bounce (such as ``550``, ``"5.1.1 no such user"``) is recorded as
+      ``bounced``.
+    * Raise :class:`UncertainSendError`: it may have been delivered (the
+      request went out, the answer did not come back); logged ``uncertain``
+      and never sent again.
+    * Raise :class:`FatalSendError` (or :class:`AccountRefusedError`): stop
+      the run; this message was not sent and resume sends it.
+    * Any other exception stops the run with :class:`TransportError`, and
+      the message is logged ``uncertain``.
+
+    ``send`` should retry temporary failures itself; ``mail_merge`` does not.
+    A transport that only previews sets the attribute ``delivers = False``,
+    as :class:`DryRunTransport` does, and ``mail_merge`` then runs a dry run.
+    """
 
     def open(self) -> None: ...
 
-    def send(self, message: EmailMessage) -> object: ...
+    def send(self, message: EmailMessage) -> Mapping[str, tuple[int, bytes | str]] | None: ...
 
     def close(self) -> None: ...
 
@@ -484,6 +515,9 @@ class SMTPTransport:
             message data (RFC 5321 section 4.5.3.2.6 recommends 10 minutes).
     """
 
+    #: It sends mail; :func:`~email_merge_tool.mail_merge` uses it only with ``dry_run=False``.
+    delivers = True
+
     def __init__(
         self, config: SMTPConfig, *, max_retries: int = 3, backoff: float = 2.0, data_timeout: float | None = 600.0
     ) -> None:
@@ -673,6 +707,10 @@ class DryRunTransport:
     would go over SMTP, ``Bcc`` included, and is named after the message's
     number and its ``To`` address, shortened with a hash past 80 characters.
 
+    Pass it as ``transport=`` to collect the messages or choose where they
+    go; :func:`~email_merge_tool.mail_merge` treats every run with it as a
+    dry run, since it sends nothing (``delivers`` is false).
+
     The directory keeps a list of the files a dry run wrote, in
     ``.email-merge-dry-run``. The next dry run into the same directory first
     deletes those files, so the directory shows the latest run only. Other
@@ -685,6 +723,9 @@ class DryRunTransport:
 
     #: The file in ``output_dir`` that lists the ``.eml`` files the last run wrote.
     MANIFEST = ".email-merge-dry-run"
+
+    #: It sends nothing, so :func:`~email_merge_tool.mail_merge` treats a run with it as a dry run.
+    delivers = False
 
     def __init__(self, output_dir: str | Path | None = None) -> None:
         self.output_dir = Path(output_dir) if output_dir is not None else None

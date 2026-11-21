@@ -24,6 +24,7 @@ from .data import (  # noqa: E402
     normalize_address,
     validate_recipients,
 )
+from .errors import EmailMergeError  # noqa: E402
 from .experiment import Assignment, assign_variants, write_assignments  # noqa: E402
 from .merge import MergeReport, Result, mail_merge  # noqa: E402
 from .message import build_message, wire_bytes  # noqa: E402
@@ -45,6 +46,7 @@ from .transport import (  # noqa: E402
     PermanentSendError,
     SMTPConfig,
     SMTPTransport,
+    Transport,
     TransportError,
     UncertainSendError,
 )
@@ -87,4 +89,6 @@ __all__ = [
     "FatalSendError",
     "AccountRefusedError",
     "TransportError",
+    "Transport",
+    "EmailMergeError",
 ]
