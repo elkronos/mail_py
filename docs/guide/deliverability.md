@@ -9,6 +9,7 @@ decided outside this tool, but the tool does its part and makes the rest easy.
 | Practice | Why | Reference |
 | --- | --- | --- |
 | `Date` and `Message-ID` on every message | Required or expected by RFC 5322, and missing ones are a spam signal | RFC 5322 §3.6 |
+| 7-bit bodies, never base64 for ASCII text, lines of at most 76 characters (see [encodings](templates.md#how-messages-are-encoded)) | Strict gateways and validators flag longer lines, and filters penalize needless base64 | RFC 2045 §6.7 |
 | Plain-text part with every HTML message (`multipart/alternative`) | Accessibility (screen readers, text clients), and HTML-only mail scores worse with filters | RFC 2046 §5.1.4 |
 | `List-Unsubscribe` with per-recipient values | Lets mail clients show an "Unsubscribe" button | RFC 2369 |
 | `List-Unsubscribe-Post: List-Unsubscribe=One-Click` | One-click unsubscribe, required by Gmail and Yahoo for bulk senders since 2024 | RFC 8058 |

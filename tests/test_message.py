@@ -93,7 +93,7 @@ def test_list_unsubscribe_folds_only_between_uris(people):
         ("<https://example.org/désinscription>", "must be ASCII"),
         ("https://example.org/u?id=1", "one or more <URI>"),
         ("<https://example.org/u?id=a b>", "one or more <URI>"),
-        ("<https://example.org/u?t=" + "a" * 1000 + ">", "at most 980 characters"),
+        ("<https://example.org/u?t=" + "a" * 1000 + ">", "980 characters a header line allows"),
     ],
 )
 def test_bad_list_unsubscribe_values_are_refused(value, error):
@@ -161,3 +161,53 @@ def test_internationalized_domain_is_written_as_utf8(tmp_path):
     data = eml.read_bytes()
     assert "From: Ann <ann@münchen.de>\r\n".encode() in data and "Subject: Grüße\r\n".encode() in data
     assert data == wire_bytes(message, keep_bcc=True)
+
+
+def body_parts(message):
+    return [part for part in message.walk() if part.get_content_maintype() == "text"]
+
+
+@pytest.mark.parametrize(
+    ("text", "encoding"),
+    [
+        ("Dear Ann,\nshort lines only.\n", "7bit"),
+        ("Dear Ann,\n" + "=" * 30 + "\nJUNE NEWSLETTER\n" + "=" * 79 + "\n" + "word " * 50 + "\n", "quoted-printable"),
+        ("NUL \0 is not 7bit data\n", "quoted-printable"),
+        ("Liebe Frau Müller,\nvielen Dank für Ihre Teilnahme. Wir melden uns nächste Woche.\n", "quoted-printable"),
+        ("你好，欢迎参加我们的研究。请在周五之前回复。\n" * 3, "base64"),
+    ],
+)
+def test_transfer_encoding_is_chosen_explicitly(text, encoding):
+    html = f"<p>{text}</p>"
+    wire = wire_bytes(build_message(RenderedMessage("ann@example.org", "Hi", text, html=html), sender=SENDER))
+    assert wire.isascii()  # never 8bit, so no 8BITMIME is needed
+    parts = body_parts(message_from_bytes(wire, policy=policy.default))
+    assert [p["Content-Transfer-Encoding"] for p in parts] == [encoding, encoding]
+    assert [p.get_content().replace("\r\n", "\n") for p in parts] == [text, html + "\n"]
+    body = wire.split(b"\r\n\r\n", 1)[1]
+    assert max(len(line) for line in body.split(b"\r\n")) <= 76  # RFC 2045 section 6.7
+
+
+def test_non_ascii_subject_survives_folding_on_every_version():
+    # Python 3.10 to 3.12 fold this subject as "...for invitationlab..." when left to the standard library.
+    subject = "the lab survey 🎉 the a 🎉 for invitation lab 你好 open lab open Zoë 你好"
+    wire = wire_bytes(build_message(RenderedMessage("ann@example.org", subject, "x"), sender=SENDER))
+    assert header_lines(wire, "Subject") == [
+        b"Subject: =?utf-8?b?dGhlIGxhYiBzdXJ2ZXkg8J+OiSB0aGUgYSDwn46JIGZvciBpbnZp?=",
+        b" =?utf-8?b?dGF0aW9uIGxhYiDkvaDlpb0gb3BlbiBsYWIgb3BlbiBab8OrIOS9oOWlvQ==?=",
+    ]
+    assert message_from_bytes(wire, policy=policy.default)["Subject"] == subject
+
+
+def test_long_subjects_round_trip_within_the_line_limit():
+    for subject in [
+        "Grüße " * 40,
+        "😀" * 100,
+        "open the a 😀😀 Zoë invitation for open Zoë lab meeting " * 3,
+        "ascii " * 30,
+    ]:
+        message = build_message(RenderedMessage("ann@example.org", subject, "x"), sender=SENDER)
+        assert message["Subject"] == subject
+        wire = wire_bytes(message)
+        assert all(len(line) <= 76 for line in header_lines(wire, "Subject"))
+        assert message_from_bytes(wire, policy=policy.default)["Subject"] == subject

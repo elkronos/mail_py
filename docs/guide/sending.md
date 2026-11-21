@@ -108,12 +108,14 @@ unencrypted.
 
 ## What the server receives
 
-Each message goes out as the dry run's `.eml` file shows it, with two
-differences: the `Bcc` header is removed (Bcc recipients still get the
-message), and lines end in CRLF, as SMTP requires. Body lines that start with
-`From ` are sent unchanged. Text with non-ASCII characters is sent as 8-bit
-data and declared with `BODY=8BITMIME` (RFC 6152). A server that doesn't
-offer 8BITMIME gets those parts encoded as base64 instead.
+Each message goes out as the dry run's `.eml` file shows it, except that the
+`Bcc` header is removed (Bcc recipients still get the message). Lines end in
+CRLF, as SMTP requires, and body lines that start with `From ` are sent
+unchanged. Text parts are 7-bit data (see
+[how messages are encoded](templates.md#how-messages-are-encoded)), so they
+need no server extension. A message built elsewhere with 8-bit text is
+declared with `BODY=8BITMIME` (RFC 6152), and a server that doesn't offer
+8BITMIME gets those parts encoded as base64 instead.
 
 ## Sending from Python
 

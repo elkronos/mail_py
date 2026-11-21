@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import io
 import mimetypes
+import quopri
 import re
 from collections.abc import Sequence
 from email.errors import MessageError
@@ -12,16 +14,26 @@ from email.generator import BytesGenerator
 from email.headerregistry import BaseHeader, HeaderRegistry
 from email.message import EmailMessage, Message
 from email.policy import EmailPolicy, Policy
+from email.policy import default as _default_policy
 from email.utils import formatdate, getaddresses, make_msgid, parseaddr
 from pathlib import Path
 from typing import Any
 
 from .templates import RenderedMessage
 
-__all__ = ["build_message", "needs_smtputf8", "wire_bytes"]
+__all__ = ["POLICY", "build_message", "needs_smtputf8", "wire_bytes"]
 
 # RFC 5322 section 2.1.1: a header line, name included, may not exceed 998 characters.
 _MAX_LINE = 998
+
+# RFC 2045 section 6.7: quoted-printable lines are at most 76 characters, and
+# RFC 2047 section 2: so are header lines that hold encoded words.
+_LINE_LENGTH = 76
+
+#: The policy messages are built with: the standard ``email.policy.default``
+#: with 76-character lines, so quoted-printable and base64 bodies and folded
+#: headers meet RFC 2045 and RFC 2047 on every Python version.
+POLICY = _default_policy.clone(max_line_length=_LINE_LENGTH)
 
 # A line break inside a folded header that is not followed by folding
 # whitespace, which would end the header or start a new one. Python 3.13
@@ -63,8 +75,8 @@ _VERBATIM_CLASSES: dict[str, type[BaseHeader]] = {}
 def _verbatim_header(name: str, tokens: Sequence[str]) -> BaseHeader:
     """A header object for ``name`` whose value is ``tokens`` joined by spaces."""
     value = " ".join(tokens)
-    if not value.isascii() or len(name) + 2 + len(value) > _MAX_LINE:
-        raise ValueError(f"{name} must be ASCII and at most {_MAX_LINE - len(name) - 2} characters long")
+    if not value.isascii() or any(len(name) + 2 + len(token) > _MAX_LINE for token in tokens):
+        raise ValueError(f"{name} must be ASCII, with no part longer than {_MAX_LINE - len(name) - 2} characters")
     cls = _VERBATIM_CLASSES.get(name.lower())
     if cls is None:
         # The registry's class derives from the stdlib header class and
@@ -74,6 +86,45 @@ def _verbatim_header(name: str, tokens: Sequence[str]) -> BaseHeader:
     header = cls(name, value)
     header._tokens = tuple(tokens)  # type: ignore[attr-defined]
     return header
+
+
+def _encoded_subject(subject: str) -> BaseHeader:
+    """A non-ASCII Subject as RFC 2047 base64 encoded words, folded between words.
+
+    Python 3.10 to 3.12 drop a space when they fold a long subject that mixes
+    ASCII words with encoded ones (emoji, accented names), and recipients see
+    "openZoë". Encoding the whole subject here gives the same bytes on every
+    version: each encoded word holds whole characters, the whitespace between
+    encoded words is not part of the text (RFC 2047 section 6.2), and every
+    line stays within 76 characters.
+    """
+    words: list[str] = []
+    room = _LINE_LENGTH - len("Subject: ")
+    chunk = b""
+    for char in subject:
+        data = char.encode("utf-8")
+        if chunk and 12 + 4 * -(-(len(chunk) + len(data)) // 3) > room:  # =?utf-8?b?...?= around the base64
+            words.append(f"=?utf-8?b?{base64.b64encode(chunk).decode('ascii')}?=")
+            chunk, room = b"", _LINE_LENGTH - 1
+        chunk += data
+    words.append(f"=?utf-8?b?{base64.b64encode(chunk).decode('ascii')}?=")
+    return _verbatim_header("Subject", words)
+
+
+def _transfer_encoding(text: str) -> str:
+    """The Content-Transfer-Encoding for a UTF-8 text part.
+
+    ASCII text is 7bit when no line exceeds 76 characters and quoted-printable
+    otherwise, never base64: filters such as rspamd penalize base64 text that
+    did not need it. Other text is quoted-printable or base64, whichever is
+    shorter. Bodies are never 8bit, so they need no 8BITMIME and survive relays
+    that convert 8-bit mail (which breaks DKIM signatures).
+    """
+    data = text.encode("utf-8")
+    if data.isascii():
+        short = all(len(line) <= _LINE_LENGTH for line in data.splitlines())
+        return "7bit" if short and b"\0" not in data else "quoted-printable"
+    return "quoted-printable" if len(quopri.encodestring(data)) <= len(base64.encodebytes(data)) else "base64"
 
 
 def _unsubscribe_uris(value: str) -> list[str]:
@@ -109,8 +160,10 @@ def build_message(
 
     The message always has ``Date`` and ``Message-ID`` headers (RFC 5322),
     a plain-text part, and, when the template has HTML, a
-    ``multipart/alternative`` HTML part. Non-ASCII subjects and names are
-    encoded correctly by the standard library.
+    ``multipart/alternative`` HTML part. It uses :data:`POLICY`. Text parts
+    are UTF-8 in ``7bit``, quoted-printable or base64 (never ``8bit``), and a
+    non-ASCII subject is written as RFC 2047 encoded words, so the bytes are
+    the same on every Python version.
 
     Args:
         rendered: Output of :meth:`Template.render`.
@@ -128,19 +181,21 @@ def build_message(
         attachments: Files to attach. The MIME type is guessed from the file
             extension (``application/octet-stream`` if unknown).
     """
-    msg = EmailMessage()
+    msg = EmailMessage(policy=POLICY)
     from_value = rendered.headers.get("From") or sender
     msg["From"] = from_value
     msg["To"] = rendered.to
     for name in ("Cc", "Bcc", "Reply-To"):
         if rendered.headers.get(name):
             msg[name] = rendered.headers[name]
-    msg["Subject"] = rendered.subject
+    msg["Subject"] = rendered.subject if rendered.subject.isascii() else _encoded_subject(rendered.subject)
     msg["Date"] = formatdate(localtime=True)
     domain = parseaddr(from_value)[1].rpartition("@")[2] or None
     msg["Message-ID"] = make_msgid(domain=domain)
     if list_unsubscribe:
         uris = _unsubscribe_uris(list_unsubscribe)
+        if len("List-Unsubscribe: ") + len(", ".join(uris)) > _MAX_LINE:
+            raise ValueError(f"List-Unsubscribe is longer than the {_MAX_LINE - 18} characters a header line allows")
         msg["List-Unsubscribe"] = _verbatim_header("List-Unsubscribe", [u + "," for u in uris[:-1]] + uris[-1:])
         if one_click_unsubscribe:
             if not any(u.lower().startswith("<https:") for u in uris):
@@ -148,9 +203,9 @@ def build_message(
             msg["List-Unsubscribe-Post"] = _verbatim_header("List-Unsubscribe-Post", ["List-Unsubscribe=One-Click"])
     elif one_click_unsubscribe:
         raise ValueError("one_click_unsubscribe requires list_unsubscribe")
-    msg.set_content(rendered.text)
+    msg.set_content(rendered.text, cte=_transfer_encoding(rendered.text))
     if rendered.html is not None:
-        msg.add_alternative(rendered.html, subtype="html")
+        msg.add_alternative(rendered.html, subtype="html", cte=_transfer_encoding(rendered.html))
     for item in attachments:
         path = Path(item)
         ctype, encoding = mimetypes.guess_type(path.name)

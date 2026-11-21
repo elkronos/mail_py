@@ -57,7 +57,30 @@ fully predictable in a dry run.
   fails validation. This blocks header injection (such as a "name" containing
   `\nBcc: someone@else`).
 - **Non-ASCII:** subjects, names and bodies in any language are encoded per
-  RFC 2047 and RFC 6532 by the standard library, and verified by a round-trip test.
+  RFC 2047 and RFC 6532, and verified by a round-trip test. See
+  [how messages are encoded](#how-messages-are-encoded).
+
+## How messages are encoded
+
+The tool chooses each encoding itself instead of leaving it to the standard
+library, whose choices differ between Python versions.
+
+- **Lines** are at most 76 characters in quoted-printable and base64 bodies
+  (RFC 2045) and in folded headers.
+- **Text and HTML bodies** are UTF-8. ASCII text is sent as `7bit` when no
+  line is longer than 76 characters, and as quoted-printable otherwise. It is
+  never base64, which spam filters penalize for text that did not need it.
+  Text with other characters is quoted-printable or base64, whichever is
+  shorter: quoted-printable for most European languages, base64 for most other
+  scripts. Bodies are never `8bit`, so they reach servers without 8BITMIME
+  unchanged and keep their DKIM signature through relays.
+- **A non-ASCII subject** is written as RFC 2047 base64 encoded words, folded
+  between words. Python 3.10 to 3.12 drop a space when they fold a long subject
+  that mixes emoji or accented words with plain ones, so recipients would see
+  `openZoë`; the tool's own encoding gives the same bytes on every version.
+  ASCII subjects are written as they are.
+- **List-Unsubscribe** is written exactly as given; see
+  [deliverability](deliverability.md).
 
 ## Text and HTML together
 

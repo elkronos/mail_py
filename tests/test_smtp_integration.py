@@ -10,6 +10,7 @@ import socket
 import ssl
 from dataclasses import dataclass
 from email import message_from_bytes, policy
+from email.message import EmailMessage
 
 import pytest
 
@@ -338,15 +339,31 @@ def test_from_lines_reach_the_recipient_unchanged(server, people, sleeps, tmp_pa
 
 
 def test_8bit_text_is_declared_or_encoded_for_7bit_servers(serve, sleeps):
-    rows = [{"email": "zoe@example.org", "first_name": "Zoë"}]
+    # build_message never writes 8-bit bodies; a message built elsewhere can have them.
+    message = EmailMessage()
+    message["From"] = SENDER
+    message["To"] = "zoe@example.org"
+    message["Subject"] = "Hello"
+    message.set_content("Dear Zoë,\nWelcome.\n")
+    assert message["Content-Transfer-Encoding"] == "8bit"
     eight = serve()
-    send(eight, rows)
+    with plain(eight) as transport:
+        transport.send(message)
     (delivery,) = eight.delivered
     assert "BODY=8BITMIME" in delivery.mail_options
     assert "Dear Zoë,".encode() in delivery.content
 
     seven = serve(decode_data=True, enable_SMTPUTF8=False)  # no 8BITMIME; refuses 8-bit data
-    report = send(seven, rows)
+    with plain(seven) as transport:
+        transport.send(message)
+    (delivery,) = seven.delivered
+    assert delivery.content.isascii() and not any(o.startswith("BODY") for o in delivery.mail_options)
+    assert delivery.message.get_content().splitlines() == ["Dear Zoë,", "Welcome."]
+
+
+def test_merged_non_ascii_text_needs_no_8bitmime(serve, sleeps):
+    seven = serve(decode_data=True, enable_SMTPUTF8=False)  # no 8BITMIME; refuses 8-bit data
+    report = send(seven, [{"email": "zoe@example.org", "first_name": "Zoë"}])
     assert report.sent == 1
     (delivery,) = seven.delivered
     assert delivery.content.isascii() and not any(o.startswith("BODY") for o in delivery.mail_options)
