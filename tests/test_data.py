@@ -5,7 +5,7 @@ from email.utils import getaddresses
 import pytest
 
 from email_merge_tool import DataError, is_valid_address, load_recipients, validate_recipients
-from email_merge_tool.data import load_address_list, normalize_address
+from email_merge_tool.data import _parse_mailbox, _valid_address_list, load_address_list, normalize_address
 
 
 def test_csv_with_excel_bom_and_padding(tmp_path):
@@ -318,3 +318,11 @@ def test_space_after_a_closing_quote_gets_an_accurate_hint(tmp_path):
 def test_deeply_nested_comment_is_invalid_not_a_crash():
     # Short enough for the length cap, but the email generator cannot write it.
     assert not is_valid_address("cy@example.org " + "(" * 250 + ")" * 250)
+
+
+@pytest.mark.parametrize("char", ["\x85", "\u2028", "\x1b", "\x00"])
+def test_addresses_with_control_characters_are_invalid(char):
+    value = f"Ann{char}Lee <ann@example.org>"
+    assert _parse_mailbox(value) == (None, f"contains a control character (U+{ord(char):04X})")
+    assert not _valid_address_list(f"lee@example.org, {value}")
+    assert _valid_address_list("Ann\tLee <ann@example.org>")

@@ -113,6 +113,17 @@ def test_non_ascii_unsubscribe_value_fails_its_row(people):
         mail_merge(TPL, rows, sender=SENDER, list_unsubscribe="<https://example.org/u?t={token}>")
 
 
+def test_control_characters_in_data_never_reach_a_header(people):
+    rows = [dict(p, link=f"https://example.org/u/{p['id']}") for p in people]
+    rows[2]["link"] = "https://example.org/u/3\x00\x1b[2J"
+    with pytest.raises(DataError, match=r"row 3: List-Unsubscribe header would contain the control character U\+0000"):
+        mail_merge(TPL, rows, sender=SENDER, list_unsubscribe="<{link}>")
+    rows = [dict(p, first_name="Bo\x1b]52;c;cm0gLXJmIH4=\x07") if p["id"] == "2" else p for p in people]
+    with pytest.raises(DataError, match=r"row 2: Subject header would contain the control character U\+001B") as caught:
+        mail_merge(TPL, rows, sender=SENDER)
+    assert len(caught.value.issues) == 1
+
+
 def test_messages_with_verbatim_headers_copy_and_pickle():
     message = build_message(rendered(), sender=SENDER, list_unsubscribe="<https://example.org/u?id=1>")
     for clone in (copy.deepcopy(message), pickle.loads(pickle.dumps(message))):
@@ -474,7 +485,7 @@ def test_extra_headers_for_every_message(people, tmp_path):
     assert [m["X-Campaign"] for m in report.messages] == ["spring-1", "spring-2", "spring-3", "spring-4"]
     assert report.messages[0]["Precedence"] == "bulk"
     rows = [dict(p, tag="a\x07b" if p["id"] == "2" else "ok") for p in people]
-    with pytest.raises(DataError, match="row 2: the X-Tag header contains a control character"):
+    with pytest.raises(DataError, match=r"row 2: X-Tag header would contain the control character U\+0007"):
         mail_merge(TPL, rows, sender=SENDER, extra_headers={"X-Tag": "{tag}"})
     with pytest.raises(TemplateError, match="set From in the template or sender="):
         mail_merge(TPL, people, sender=SENDER, extra_headers={"From": "x@example.org"})

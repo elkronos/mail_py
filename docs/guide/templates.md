@@ -102,9 +102,16 @@ fully predictable in a dry run.
 - **HTML bodies:** every substituted value is HTML-escaped (`<`, `>`, `&`,
   quotes). The template's own markup is not touched.
 - **Headers:** if a substituted value would put a line break into `Subject`,
-  `To`, `From`, `Reply-To`, `Cc`, `Bcc` or `List-Unsubscribe`, that recipient
-  fails validation. This blocks header injection (such as a "name" containing
-  `\nBcc: someone@else`).
+  `To`, `From`, `Reply-To`, `Cc`, `Bcc`, `List-Unsubscribe` or any other
+  header, that recipient fails validation. This blocks header injection (such
+  as a "name" containing `\nBcc: someone@else`). The same applies to the
+  other control characters (NUL, ESC, DEL, the C1 range U+0080 to U+009F),
+  the Unicode line and paragraph separators, and bidirectional overrides and
+  isolates (U+202A to U+202E, U+2066 to U+2069), which can disguise a subject
+  or a name. The error names the header and the character's code point. TAB
+  is allowed, and so are the left-to-right and right-to-left marks that text
+  in Arabic or Hebrew needs. A value holding RFC 2047 encoded words
+  (`=?utf-8?q?...?=`) is checked again as mail clients will decode it.
 - **Non-ASCII:** subjects, names and bodies in any language are encoded per
   RFC 2047 and RFC 6532, and verified by a round-trip test. See
   [how messages are encoded](#how-messages-are-encoded).

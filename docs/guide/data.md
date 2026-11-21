@@ -49,7 +49,7 @@ just the first, so you can fix them all in one pass.
     them needs SMTPUTF8. The part after the `@` must be a domain name made of
     letters, digits and hyphens, so `ann@x.org|2024` and `'ann@x.org'` (Excel's
     text prefix) are rejected, as are invisible characters such as a
-    zero-width space. It can't tell whether a mailbox exists. Only delivery (and bounces) can,
+    zero-width space and control characters such as ESC or U+0085. It can't tell whether a mailbox exists. Only delivery (and bounces) can,
     and "verifying" addresses by probing mail servers is unreliable and
     frowned upon by providers.
 

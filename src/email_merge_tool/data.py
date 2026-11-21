@@ -358,6 +358,9 @@ def _parse_mailbox(value: str) -> tuple[Address | None, str]:
     invisible = next((ch for ch in text if unicodedata.category(ch) == "Cf"), None)
     if invisible is not None:
         return None, f"contains an invisible character (U+{ord(invisible):04X})"
+    control = _control_character(text)
+    if control is not None:
+        return None, f"contains a control character (U+{ord(control):04X})"
     try:
         header = policy.default.header_factory("To", text)
         groups, defects = header.groups, header.defects
@@ -389,6 +392,11 @@ def _parse_mailbox(value: str) -> tuple[Address | None, str]:
     return address, ""
 
 
+def _control_character(text: str) -> str | None:
+    """The first control character (C0 other than TAB, DEL, C1) or line separator in ``text``."""
+    return next((ch for ch in text if unicodedata.category(ch) in ("Cc", "Zl", "Zp") and ch != "\t"), None)
+
+
 def _address_problem(address: Address) -> str:
     """What is wrong with a parsed address, or ``""`` if nothing is."""
     local, domain = address.username, address.domain
@@ -417,7 +425,7 @@ def _valid_address_list(value: str) -> bool:
     """
     if not value.strip() or len(value) > _MAX_HEADER_LENGTH or "\r" in value or "\n" in value:
         return False
-    if any(unicodedata.category(ch) == "Cf" for ch in value):
+    if any(unicodedata.category(ch) == "Cf" for ch in value) or _control_character(value) is not None:
         return False
     try:
         header = policy.default.header_factory("To", value)

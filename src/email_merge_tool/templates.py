@@ -12,7 +12,7 @@ Placeholder syntax
 In HTML bodies every substituted value is HTML-escaped, so a recipient whose
 name is ``<script>`` cannot inject markup. Header values (Subject, Reply-To,
 ...) are rejected if a substituted value contains a line break, which blocks
-header injection.
+header injection, or another control or bidirectional control character.
 """
 
 from __future__ import annotations
@@ -20,9 +20,11 @@ from __future__ import annotations
 import difflib
 import html
 import re
+import unicodedata
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from email.header import decode_header, make_header
 from html.parser import HTMLParser
 from pathlib import Path
 from types import MappingProxyType
@@ -84,6 +86,10 @@ _OWNED_HEADERS = {
 # A header field name (RFC 5322 section 2.2): printable ASCII except the colon.
 _FIELD_NAME = re.compile(r"[!-9;-~]+")
 
+# Bidirectional embeddings, overrides and isolates. In a header they reorder
+# the displayed text, for example to disguise a subject or a sender's name.
+_BIDI_CONTROLS = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
 
 class TemplateError(EmailMergeError, ValueError):
     """Raised for malformed templates or values that cannot be rendered."""
@@ -113,6 +119,46 @@ def header_name(name: str) -> str:
     suggestion = f" (did you mean {hint[0]!r}?)" if hint else ""
     allowed = ", ".join(ALLOWED_HEADERS)
     raise TemplateError(f"unsupported header {key!r}{suggestion}; allowed: {allowed}, and any header starting with X-")
+
+
+def _character_problem(value: str) -> str:
+    """The first character of ``value`` a header may not contain, described, or ``""``."""
+    for char in value:
+        if char in "\r\n":
+            return "a line break (possible header injection)"
+        category = unicodedata.category(char)
+        if category == "Cc" and char != "\t":
+            return f"the control character U+{ord(char):04X}"
+        if category in ("Zl", "Zp"):
+            return f"the line or paragraph separator U+{ord(char):04X}"
+        if char in _BIDI_CONTROLS:
+            return f"the bidirectional control character U+{ord(char):04X}"
+    return ""
+
+
+def _check_header_value(name: str, value: str) -> None:
+    """Refuse a header value that would not display as written.
+
+    Line breaks (which could add headers), other control characters such as
+    NUL, ESC and DEL, the C1 controls (U+0080 to U+009F), the Unicode line and
+    paragraph separators and bidirectional overrides are refused. TAB is
+    allowed. A value holding RFC 2047 encoded words (``=?utf-8?q?...?=``) is
+    checked again as mail clients decode it.
+
+    Raises:
+        TemplateError: naming the header and the character.
+    """
+    problem = _character_problem(value)
+    if not problem and "=?" in value:
+        try:
+            decoded = str(make_header(decode_header(value)))
+        except Exception:  # noqa: BLE001 - malformed encoded words are left to the email package
+            decoded = ""
+        problem = _character_problem(decoded)
+        if problem:
+            problem += " once its encoded words are decoded"
+    if problem:
+        raise TemplateError(f"{name} header would contain {problem}")
 
 
 def _is_header_name(name: str) -> bool:
@@ -237,6 +283,11 @@ class Template:
             if canonical.lower() in {k.lower() for k in normalized}:
                 raise TemplateError(f"template {name!r} sets the {canonical} header twice")
             normalized[canonical] = value
+        for header, value in [("Subject", subject), *normalized.items()]:
+            try:
+                _check_header_value(header, value)
+            except TemplateError as exc:
+                raise TemplateError(f"template {name!r}: {exc}") from None
         object.__setattr__(self, "subject", subject)
         object.__setattr__(self, "text", text)
         object.__setattr__(self, "html", html)
@@ -264,8 +315,9 @@ class Template:
 
         Raises:
             TemplateError: if a placeholder has no value, the recipient address
-                is missing, a header would contain a line break, or the
-                subject is blank.
+                is missing, a header would contain a line break or another
+                control or bidirectional control character, or the subject is
+                blank.
         """
         if to_field not in record or not str(record[to_field] or "").strip():
             raise TemplateError(f"record has no value in the address column {to_field!r}")
@@ -273,8 +325,7 @@ class Template:
         subject = fill(self.subject, record, escape_html=False)
         headers = {k: fill(v, record, escape_html=False) for k, v in self.headers.items()}
         for name, value in [("To", to), ("Subject", subject), *headers.items()]:
-            if "\r" in value or "\n" in value:
-                raise TemplateError(f"{name} header would contain a line break (possible header injection)")
+            _check_header_value(name, value)
         if not subject.strip():
             raise TemplateError("the Subject is empty once the placeholders are filled in")
         html_body = fill(self.html, record, escape_html=True) if self.html is not None else None

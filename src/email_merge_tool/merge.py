@@ -26,7 +26,16 @@ from .data import (
 from .experiment import Assignment, assign_variants, write_assignments
 from .message import attachment_name, build_message, stamp_date, wire_bytes
 from .sendlog import SendLog, bounced_addresses, sent_addresses
-from .templates import ADDRESS_HEADERS, Template, TemplateError, fill, header_name, load_template, placeholders
+from .templates import (
+    ADDRESS_HEADERS,
+    Template,
+    TemplateError,
+    _check_header_value,
+    fill,
+    header_name,
+    load_template,
+    placeholders,
+)
 from .transport import (
     DryRunTransport,
     FatalSendError,
@@ -412,14 +421,15 @@ def mail_merge(
             if extra:
                 filled = {name: fill(value, record) for name, value in extra.items()}
                 for name, value in filled.items():
-                    if "\r" in value or "\n" in value:
-                        raise TemplateError(f"{name} header would contain a line break (possible header injection)")
+                    _check_header_value(name, value)
                 rendered = dataclasses.replace(rendered, headers={**rendered.headers, **filled})
             for name in ADDRESS_HEADERS:
                 value = rendered.headers.get(name, "")
                 if value and not _valid_address_list(value):
                     raise TemplateError(f"invalid address in {name}: {value!r}")
             unsub = fill(list_unsubscribe, record) if list_unsubscribe else None
+            if unsub is not None:
+                _check_header_value("List-Unsubscribe", unsub)
             envelope = _envelope_sender(fill(envelope_from, record)) if envelope_from else None
             files = [Path(p) for p in attachments]
             if attachment_field:
