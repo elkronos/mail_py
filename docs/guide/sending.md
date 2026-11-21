@@ -78,6 +78,15 @@ deliverability and higher limits. All of them offer SMTP, so use `--host`,
 - If the server accepts a message for the main recipient but refuses a `Cc`,
   the message counts as `sent`, with the refusal noted in `detail`.
 
+## What the server receives
+
+Each message goes out as the dry run's `.eml` file shows it, with two
+differences: the `Bcc` header is removed (Bcc recipients still get the
+message), and lines end in CRLF, as SMTP requires. Body lines that start with
+`From ` are sent unchanged. Text with non-ASCII characters is sent as 8-bit
+data and declared with `BODY=8BITMIME` (RFC 6152). A server that doesn't
+offer 8BITMIME gets those parts encoded as base64 instead.
+
 ## Sending from Python
 
 ```python

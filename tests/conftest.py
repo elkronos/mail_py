@@ -1,4 +1,5 @@
 import smtplib
+from email import message_from_bytes, policy
 
 import pytest
 
@@ -16,7 +17,7 @@ class FakeSMTP:
     """
 
     instances: list["FakeSMTP"] = []
-    # Scripted outcomes of successive send_message calls: None succeeds, an
+    # Scripted outcomes of successive sendmail calls: None succeeds, an
     # exception is raised before DATA, ("payload", exc) raises exc while the
     # message is being written, and ("after_data", exc) delivers the message
     # and then raises exc, as when the server's final reply is lost.
@@ -29,7 +30,8 @@ class FakeSMTP:
         self.host, self.port, self.timeout = host, port, timeout
         self.context = None
         self.implicit_tls = False
-        self.sent = []
+        self.sent = []  # the messages as parsed from the transmitted bytes
+        self.envelopes = []  # (sender, recipients, transmitted bytes, MAIL options)
         self.logged_in = None
         self.tls = False
         self.closed = False
@@ -48,7 +50,14 @@ class FakeSMTP:
             raise FakeSMTP.login_error
         self.logged_in = (user, password)
 
-    def send_message(self, msg):
+    def ehlo_or_helo_if_needed(self):
+        pass
+
+    def has_extn(self, name):
+        return name.lower() in FakeSMTP.features
+
+    def sendmail(self, from_addr, to_addrs, msg, mail_options=(), rcpt_options=()):
+        assert isinstance(msg, bytes)
         if FakeSMTP.failures:
             error = FakeSMTP.failures.pop(0)  # None means "this call succeeds"
             if isinstance(error, tuple) and error[0] == "payload":
@@ -59,13 +68,17 @@ class FakeSMTP:
                 exc = error[1]
                 rejected = isinstance(exc, smtplib.SMTPResponseException) and 400 <= exc.smtp_code < 600
                 if not rejected:  # the server queued it, but its reply never arrived
-                    self.sent.append(msg)
+                    self._keep(from_addr, to_addrs, msg, mail_options)
                 raise exc
             if error is not None:
                 raise error
         self.data(msg)
-        self.sent.append(msg)
+        self._keep(from_addr, to_addrs, msg, mail_options)
         return {}
+
+    def _keep(self, from_addr, to_addrs, msg, mail_options):
+        self.envelopes.append((from_addr, list(to_addrs), msg, list(mail_options)))
+        self.sent.append(message_from_bytes(msg, policy=policy.default))
 
     def data(self, msg):
         # smtplib's data() writes the DATA command, then the message.

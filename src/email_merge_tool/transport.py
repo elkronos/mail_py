@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import copy
+import io
 import logging
 import smtplib
 import ssl
 import time
 from dataclasses import dataclass
 from email.errors import MessageError
-from email.message import EmailMessage
+from email.generator import BytesGenerator
+from email.message import EmailMessage, Message
+from email.utils import getaddresses
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -108,7 +112,7 @@ class Transport(Protocol):
 class _DataPhase:
     """Track whether the whole message has been written to an SMTP connection.
 
-    ``smtplib``'s ``send_message`` calls the connection's ``data()`` method
+    ``smtplib``'s ``sendmail`` calls the connection's ``data()`` method
     once MAIL and RCPT have succeeded, and ``data()`` writes twice: the DATA
     command, then the message ending in ``"\\r\\n.\\r\\n"``. Shadowing ``data()``
     and ``send()`` on this one instance marks the moment the second write
@@ -159,6 +163,63 @@ class _DataPhase:
     def __exit__(self, *exc: object) -> None:
         vars(self._smtp).pop("data", None)
         vars(self._smtp).pop("send", None)
+
+
+def _envelope(message: Message) -> tuple[str, list[str]]:
+    """The envelope sender and recipients, chosen as ``smtplib``'s ``send_message`` does.
+
+    The sender is the ``Sender`` address, or else the ``From`` address. The
+    recipients are every address in ``To``, ``Bcc`` and ``Cc``. A message with
+    one block of ``Resent-`` headers uses those instead.
+    """
+    resent = message.get_all("Resent-Date")
+    if resent is None:
+        prefix = ""
+    elif len(resent) == 1:
+        prefix = "Resent-"
+    else:
+        raise ValueError("message has more than one 'Resent-' header block")
+    sender = message[prefix + "Sender"] if prefix + "Sender" in message else message[prefix + "From"]
+    fields = [message[prefix + name] for name in ("To", "Bcc", "Cc") if message[prefix + name] is not None]
+    return getaddresses([sender])[0][1], [address for _, address in getaddresses(fields)]
+
+
+def _flatten(message: Message, *, utf8: bool = False, eight_bit: bool = True) -> bytes:
+    """The message as transmitted: ``Bcc`` removed and CRLF line endings.
+
+    ``smtplib`` flattens with ``mangle_from_=True``, which turns body lines
+    starting ``From `` into ``>From ``; that quoting belongs to mbox files,
+    not SMTP. Without ``eight_bit``, 8-bit text parts are re-encoded (base64
+    or quoted-printable) so the result is 7-bit.
+    """
+    transmitted = copy.copy(message)  # deleting headers replaces the copy's header list, not the original's
+    del transmitted["Bcc"]
+    del transmitted["Resent-Bcc"]
+    overrides: dict[str, Any] = {"linesep": "\r\n"}
+    if utf8:
+        overrides["utf8"] = True
+    if not eight_bit:
+        overrides["cte_type"] = "7bit"
+    with io.BytesIO() as out:
+        BytesGenerator(out, mangle_from_=False, policy=message.policy.clone(**overrides)).flatten(transmitted)
+        return out.getvalue()
+
+
+def _wire(smtp: smtplib.SMTP, message: Message, sender: str, recipients: list[str]) -> tuple[bytes, list[str]]:
+    """The bytes to send to this server, and the MAIL options they need."""
+    smtp.ehlo_or_helo_if_needed()
+    if not "".join([sender, *recipients]).isascii():
+        if not smtp.has_extn("smtputf8"):
+            raise smtplib.SMTPNotSupportedError(
+                "an address needs internationalized email (SMTPUTF8), which the server does not offer"
+            )
+        return _flatten(message, utf8=True), ["SMTPUTF8", "BODY=8BITMIME"]
+    payload = _flatten(message)
+    if payload.isascii():
+        return payload, []
+    if smtp.has_extn("8bitmime"):
+        return payload, ["BODY=8BITMIME"]  # RFC 6152: 8-bit data must be declared
+    return _flatten(message, eight_bit=False), []
 
 
 class SMTPTransport:
@@ -237,15 +298,18 @@ class SMTPTransport:
         """
         attempt = 0
         self.unconfirmed = False
+        sender, recipients = _envelope(message)
         while True:
             phase: _DataPhase | None = None
             try:
                 if self._smtp is None:
                     self.open()
-                assert self._smtp is not None
-                phase = _DataPhase(self._smtp, self.data_timeout)
+                smtp = self._smtp
+                assert smtp is not None
+                payload, options = _wire(smtp, message, sender, recipients)
+                phase = _DataPhase(smtp, self.data_timeout)
                 with phase:
-                    return self._smtp.send_message(message)
+                    return smtp.sendmail(sender, recipients, payload, options)
             except smtplib.SMTPRecipientsRefused as exc:
                 raise PermanentSendError(f"recipient refused: {exc.recipients}") from exc
             except smtplib.SMTPResponseException as exc:

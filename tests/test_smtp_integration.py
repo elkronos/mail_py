@@ -281,3 +281,33 @@ def test_tls_certificate_is_verified(serve, people, monkeypatch, ca, security):
     _trust(monkeypatch, ca)
     report = mail_merge(TPL, people[:1], sender=SENDER, dry_run=False, transport=transport)
     assert report.sent == 1 and server.delivered[0].tls
+
+
+def test_from_lines_reach_the_recipient_unchanged(server, people, sleeps, tmp_path):
+    line = "From the whole study team, thanks!"
+    tpl = Template(subject="s", text=f"Dear {{first_name}},\n{line}\n.Dotted\n", html=f"<p>Hi</p>\n{line}<br>\n")
+    preview = mail_merge(tpl, people[:1], sender=SENDER, output_dir=tmp_path / "eml")
+    assert preview.count("dry_run") == 1
+    send(server, people[:1], template=tpl)
+    wire = server.delivered[0].content
+    assert b">From" not in wire
+    assert wire.count(f"\r\n{line}".encode()) == 2  # the text and the HTML part
+    assert b"\r\n.Dotted\r\n" in wire  # smtplib's dot-stuffing is undone by the server
+    eml = next((tmp_path / "eml").glob("*.eml")).read_bytes()
+    assert eml.count(f"\n{line}".encode()) == 2  # what the preview showed is what was sent
+
+
+def test_8bit_text_is_declared_or_encoded_for_7bit_servers(serve, sleeps):
+    rows = [{"email": "zoe@example.org", "first_name": "Zoë"}]
+    eight = serve()
+    send(eight, rows)
+    (delivery,) = eight.delivered
+    assert "BODY=8BITMIME" in delivery.mail_options
+    assert "Dear Zoë,".encode() in delivery.content
+
+    seven = serve(decode_data=True, enable_SMTPUTF8=False)  # no 8BITMIME; refuses 8-bit data
+    report = send(seven, rows)
+    assert report.sent == 1
+    (delivery,) = seven.delivered
+    assert delivery.content.isascii() and not any(o.startswith("BODY") for o in delivery.mail_options)
+    assert delivery.message.get_content().splitlines() == ["Dear Zoë,", "Welcome."]
