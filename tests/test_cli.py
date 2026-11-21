@@ -192,6 +192,7 @@ def test_starttls_not_offered_explains_and_closes_the_connection(files, fake_smt
     assert main(_send_args(files, "--no-log")) == 2
     err = capsys.readouterr().err
     assert "relay.example.org:587 does not offer STARTTLS" in err and "--security none" in err
+    assert err.endswith("Nothing was sent.\n") and "--resume" not in err
     assert fake_smtp.instances[0].closed
 
 

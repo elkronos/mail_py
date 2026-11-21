@@ -284,8 +284,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except FatalSendError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        if sending:
-            if exc.report is not None and exc.report.results:
+        if sending and exc.report is not None and not exc.report.results:
+            print("Nothing was sent.", file=sys.stderr)  # it stopped while connecting or checking sizes
+        elif sending:
+            if exc.report is not None:
                 done = len(exc.report.results)
                 print(f"Stopped after {done} of {total} recipient(s): {exc.report.summary()}.", file=sys.stderr)
             print(_resume_advice(args), file=sys.stderr)
