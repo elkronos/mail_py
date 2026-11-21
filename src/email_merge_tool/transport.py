@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import copy
-import io
 import logging
 import smtplib
 import ssl
 import time
 from dataclasses import dataclass
 from email.errors import MessageError
-from email.generator import BytesGenerator
 from email.message import EmailMessage, Message
 from email.utils import getaddresses
 from pathlib import Path
@@ -192,19 +189,10 @@ def _flatten(message: Message, *, utf8: bool = False, eight_bit: bool = True) ->
     ``smtplib`` flattens with ``mangle_from_=True``, which turns body lines
     starting ``From `` into ``>From ``; that quoting belongs to mbox files,
     not SMTP. Without ``eight_bit``, 8-bit text parts are re-encoded (base64
-    or quoted-printable) so the result is 7-bit.
+    or quoted-printable) so the result is 7-bit. Preflight serializes with the
+    same function, :func:`email_merge_tool.message.wire_bytes`.
     """
-    transmitted = copy.copy(message)  # deleting headers replaces the copy's header list, not the original's
-    del transmitted["Bcc"]
-    del transmitted["Resent-Bcc"]
-    overrides: dict[str, Any] = {"linesep": "\r\n"}
-    if utf8:
-        overrides["utf8"] = True
-    if not eight_bit:
-        overrides["cte_type"] = "7bit"
-    with io.BytesIO() as out:
-        BytesGenerator(out, mangle_from_=False, policy=message.policy.clone(**overrides)).flatten(transmitted)
-        return out.getvalue()
+    return wire_bytes(message, utf8=utf8, seven_bit=not eight_bit)
 
 
 def _wire(smtp: smtplib.SMTP, message: Message, sender: str, recipients: list[str]) -> tuple[bytes, list[str]]:

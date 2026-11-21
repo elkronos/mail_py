@@ -10,10 +10,11 @@ from collections.abc import Sequence
 from email.errors import MessageError
 from email.generator import BytesGenerator
 from email.headerregistry import BaseHeader, HeaderRegistry
-from email.message import EmailMessage
+from email.message import EmailMessage, Message
 from email.policy import EmailPolicy, Policy
 from email.utils import formatdate, getaddresses, make_msgid, parseaddr
 from pathlib import Path
+from typing import Any
 
 from .templates import RenderedMessage
 
@@ -160,7 +161,7 @@ def build_message(
     return msg
 
 
-def needs_smtputf8(message: EmailMessage) -> bool:
+def needs_smtputf8(message: Message) -> bool:
     """Whether an envelope address of ``message`` has non-ASCII characters.
 
     The envelope addresses are the ones smtplib takes from the headers:
@@ -173,13 +174,23 @@ def needs_smtputf8(message: EmailMessage) -> bool:
     return not all(address.isascii() for _, address in getaddresses(fields))
 
 
-def wire_bytes(message: EmailMessage, *, keep_bcc: bool = False) -> bytes:
+def wire_bytes(message: Message, *, keep_bcc: bool = False, utf8: bool | None = None, seven_bit: bool = False) -> bytes:
     """Serialize ``message`` as it is sent over SMTP.
 
-    The result has CRLF line endings and no ``Bcc`` header (unless
-    ``keep_bcc``), and body lines starting with "From " are left unchanged.
-    Headers are UTF-8 when :func:`needs_smtputf8` is true, as smtplib writes
-    them, and ASCII otherwise.
+    The result has CRLF line endings and no ``Bcc`` header, and body lines
+    starting with "From " are left unchanged (smtplib's ``send_message``
+    writes them as ">From "). Preflight, the SMTP transport and the dry run's
+    ``.eml`` files all use this function, so validation checks the bytes that
+    are sent.
+
+    Args:
+        message: The message.
+        keep_bcc: Keep the ``Bcc`` header, for a preview.
+        utf8: Write headers as UTF-8 (RFC 6532), for a server that offers
+            SMTPUTF8. ``None`` writes UTF-8 when :func:`needs_smtputf8` is
+            true and ASCII otherwise.
+        seven_bit: Re-encode 8-bit text parts as base64 or quoted-printable,
+            for a server that does not offer 8BITMIME.
 
     Raises:
         email.errors.MessageError: a header folds into a line that does not
@@ -193,9 +204,14 @@ def wire_bytes(message: EmailMessage, *, keep_bcc: bool = False) -> bytes:
     if not keep_bcc:
         del flat["Bcc"]
         del flat["Resent-Bcc"]
-    policy = message.policy.clone(linesep="\r\n")
-    if isinstance(policy, EmailPolicy) and needs_smtputf8(message):
-        policy = policy.clone(utf8=True)
+    if utf8 is None:
+        utf8 = isinstance(message.policy, EmailPolicy) and needs_smtputf8(message)
+    overrides: dict[str, Any] = {"linesep": "\r\n"}
+    if utf8:
+        overrides["utf8"] = True
+    if seven_bit:
+        overrides["cte_type"] = "7bit"
+    policy = message.policy.clone(**overrides)
     for part in flat.walk():
         for name, value in part.raw_items():
             folded = policy.fold_binary(name, value).removesuffix(b"\r\n")
