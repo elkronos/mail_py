@@ -766,3 +766,28 @@ def test_the_transport_contract_is_exported():
         assert isinstance(error, EmailMergeError)
     assert isinstance(DataError("x"), ValueError) and isinstance(TemplateError("x"), ValueError)
     assert issubclass(TransportError, FatalSendError) and issubclass(AccountRefusedError, EmailMergeError)
+
+
+def test_a_message_over_max_message_size_fails_validation(people, tmp_path):
+    report_pdf = tmp_path / "report.pdf"
+    report_pdf.write_bytes(b"%PDF" + bytes(300_000))
+    with pytest.raises(DataError) as info:
+        mail_merge(TPL, people[:2], sender=SENDER, attachments=[report_pdf], max_message_size=300_000)
+    assert [i.row for i in info.value.issues] == [1, 2]
+    message = info.value.issues[0].message
+    assert message.startswith("the message is 0.4 MB as sent, over the 0.3 MB limit (max_message_size, --max-size)")
+    assert "attachments: report.pdf (0.3 MB)" in message
+    for off in (None, 0):
+        assert mail_merge(TPL, people[:2], sender=SENDER, attachments=[report_pdf], max_message_size=off).messages
+    assert mail_merge(TPL, people[:2], sender=SENDER, attachments=[report_pdf]).messages  # the default is 25 MB
+    with pytest.raises(ValueError, match="max_message_size must be >= 0"):
+        mail_merge(TPL, people, sender=SENDER, max_message_size=-1)
+
+
+def test_large_messages_get_one_warning(people, tmp_path, monkeypatch):
+    monkeypatch.setattr("email_merge_tool.merge.LARGE_MESSAGE", 2_000)
+    rows = [dict(p, note="x" * (3_000 if p["id"] in ("2", "3") else 10) + "y" * (int(p["id"]) * 10)) for p in people]
+    report = mail_merge(Template(subject="s", text="{note}"), rows, sender=SENDER)
+    notes = [str(i) for i in report.issues if i.where == "message size"]
+    assert len(notes) == 1
+    assert notes[0].startswith("warning: message size: 2 message(s) are over 2,000 bytes (the largest, row 3, is ")

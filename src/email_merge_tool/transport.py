@@ -188,6 +188,10 @@ class Transport(Protocol):
     ``send`` should retry temporary failures itself; ``mail_merge`` does not.
     A transport that only previews sets the attribute ``delivers = False``,
     as :class:`DryRunTransport` does, and ``mail_merge`` then runs a dry run.
+    A transport that knows the largest message it can send sets
+    ``size_limit`` (bytes) by the end of ``open()``, as
+    :class:`SMTPTransport` does from the server's EHLO SIZE; ``mail_merge``
+    then stops before the first send if a message is larger.
     """
 
     def open(self) -> None: ...
@@ -443,6 +447,12 @@ def _refused_account(error: smtplib.SMTPException, sender: str) -> AccountRefuse
     return None
 
 
+def _size_limit(smtp: smtplib.SMTP) -> int | None:
+    """The SIZE the server announced in its EHLO reply, or None for none or ``SIZE 0`` (no fixed limit)."""
+    value = str(getattr(smtp, "esmtp_features", {}).get("size", "")).strip()
+    return int(value) if value.isdigit() and int(value) > 0 else None
+
+
 def _open_error(cfg: SMTPConfig, step: str, exc: BaseException) -> str:
     """Explain a failure in :meth:`SMTPTransport.open` by the step it happened in."""
     where = f"{cfg.host}:{cfg.port}"
@@ -476,6 +486,8 @@ def _open_error(cfg: SMTPConfig, step: str, exc: BaseException) -> str:
                 f"{where} does not offer a login (no AUTH). For a relay that needs none, use --no-auth (username=None)."
             )
         return f"login to {cfg.host} failed ({_reason(exc)})."
+    if step == "ehlo" and isinstance(exc, smtplib.SMTPHeloError):
+        return f"{where} refused the EHLO and HELO greetings ({_reason(exc)})."
     if isinstance(exc, smtplib.SMTPConnectError):  # the greeting was not 220
         return f"{where} refused the connection ({_reason(exc)})."
     hint = "check the host name and port"
@@ -528,6 +540,10 @@ class SMTPTransport:
         #: True when the last send was interrupted (e.g. Ctrl-C) after the
         #: message was written, so it may have been delivered.
         self.unconfirmed = False
+        #: The largest message the server accepts, in bytes, from the SIZE in
+        #: its EHLO reply (RFC 1870); None until :meth:`open`, or when it
+        #: states no limit.
+        self.size_limit: int | None = None
         self._smtp: smtplib.SMTP | None = None
 
     def open(self) -> None:
@@ -552,6 +568,8 @@ class SMTPTransport:
             if cfg.username:
                 step = "login"
                 smtp.login(cfg.username, cfg.password or "")
+            step = "ehlo"
+            smtp.ehlo_or_helo_if_needed()  # so the server's SIZE is known before the first message
         except (OSError, smtplib.SMTPException) as exc:
             if smtp is not None:
                 try:
@@ -560,6 +578,7 @@ class SMTPTransport:
                     pass
             raise FatalSendError(_open_error(cfg, step, exc)) from exc
         self._smtp = smtp
+        self.size_limit = _size_limit(smtp)
 
     def close(self) -> None:
         if self._smtp is not None:

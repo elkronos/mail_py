@@ -226,13 +226,29 @@ def test_drop_after_data_is_uncertain_and_not_retried(server, people, sleeps, tm
     assert [r["status"] for r in read_log(tmp_path / "log.jsonl")] == ["uncertain", "sent"]
 
 
-def test_message_over_the_size_limit_fails_alone(serve, people, sleeps, tmp_path):
-    server = serve(data_size_limit=2000)
+def test_a_message_over_the_server_size_stops_the_run_before_sending(serve, people, sleeps, tmp_path):
+    server = serve(data_size_limit=2000)  # announced in EHLO as SIZE 2000
     big = Template(subject="s", text="{note}")
-    rows = [dict(people[0], note="x" * 3000), dict(people[1], note="short")]
-    report = send(server, rows, template=big, tmp_path=tmp_path)
-    assert [r.status for r in report.results] == ["failed", "sent"]
-    assert "552" in report.results[0].detail
+    rows = [dict(people[0], note="short"), dict(people[1], note="x" * 3000), dict(people[2], note="short")]
+    with pytest.raises(
+        FatalSendError, match=r"accepts messages up to 2,000 bytes .*1 message\(s\) are larger: row 2"
+    ) as info:
+        send(server, rows, template=big, tmp_path=tmp_path)
+    assert info.value.report.results == []
+    assert server.count("MAIL") == 0  # nobody was sent anything
+
+    (tmp_path / "log.jsonl").write_text('{"to": "bo@example.org", "status": "sent"}\n', encoding="utf-8")
+    report = send(server, rows, template=big, tmp_path=tmp_path, resume=True)  # the large one went out earlier
+    assert [r.status for r in report.results] == ["sent", "skipped", "sent"]
+
+
+def test_the_transport_fails_one_message_over_the_size(serve, people, sleeps):
+    server = serve(data_size_limit=2000)
+    message = mail_merge(Template(subject="s", text="x" * 3000), people[:1], sender=SENDER).messages[0]
+    with plain(server) as transport, pytest.raises(PermanentSendError, match="552"):
+        assert transport.size_limit == 2000
+        transport.send(message)
+    assert server.delivered == []
 
 
 def test_international_address_needs_smtputf8(serve, people, sleeps):

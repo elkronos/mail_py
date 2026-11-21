@@ -25,6 +25,7 @@ Without `--send`, the command validates everything, prints the first message
 | `--attach FILE` | Attach a file to every message. Repeatable. |
 | `--attachment-field COLUMN` | Column with per-recipient file path(s), `;`-separated. Placeholders are allowed. |
 | `--allow-duplicates` | Permit an address on several rows. |
+| `--max-size MB` | Largest message allowed, measured as sent, in MB of 1,000,000 bytes (default 25; `0` for no limit). A larger message fails validation, naming its attachments. |
 | `--seed SEED` | Randomly assign templates, reproducibly. |
 | `--strata COLUMN` | Stratify the assignment on this column. Repeatable. |
 | `--weights 2,1` | Allocation ratio between templates (default equal). |

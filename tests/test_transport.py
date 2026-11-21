@@ -1,6 +1,6 @@
 import pytest
 
-from email_merge_tool.transport import _account_refusal, _bounced, _enhanced_status, _mailbox_problem
+from email_merge_tool.transport import _account_refusal, _bounced, _enhanced_status, _mailbox_problem, _size_limit
 
 
 @pytest.mark.parametrize(
@@ -71,3 +71,14 @@ def test_enhanced_status():
     assert _enhanced_status("  4.7.1 Greylisted") == "4.7.1"
     assert _enhanced_status("User unknown") is None
     assert _enhanced_status("") is None
+
+
+@pytest.mark.parametrize(
+    ("features", "limit"),
+    [({"size": "35882577"}, 35882577), ({"size": "0"}, None), ({"size": ""}, None), ({}, None), ({"size": "x"}, None)],
+)
+def test_size_limit_from_ehlo(features, limit):
+    class Connection:
+        esmtp_features = features
+
+    assert _size_limit(Connection()) == limit

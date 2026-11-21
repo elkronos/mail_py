@@ -224,3 +224,14 @@ def test_bounces_exit_1_and_resume_skips_them_unless_asked(files, fake_smtp, cap
     with pytest.raises(SystemExit):
         main(_send_args(files, "--log", log, "--retry-bounced"))
     assert "--retry-bounced needs --resume" in capsys.readouterr().err
+
+
+def test_max_size_limits_messages(files, fake_smtp, capsys):
+    (files / "big.bin").write_bytes(bytes(400_000))
+    args = ["-t", str(files / "invite.txt"), "-d", str(files / "people.csv"), "--from", "t@example.org"]
+    assert main([*args, "--attach", str(files / "big.bin"), "--max-size", "0.3"]) == 2
+    err = capsys.readouterr().err
+    assert "row 1: the message is 0.5 MB as sent, over the 0.3 MB limit" in err and "big.bin (0.4 MB)" in err
+    assert main([*args, "--attach", str(files / "big.bin"), "--max-size", "0"]) == 0
+    with pytest.raises(SystemExit):
+        main([*args, "--max-size", "-1"])

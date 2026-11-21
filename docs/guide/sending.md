@@ -127,6 +127,26 @@ need no server extension. A message built elsewhere with 8-bit text is
 declared with `BODY=8BITMIME` (RFC 6152), and a server that doesn't offer
 8BITMIME gets those parts encoded as base64 instead.
 
+## Message size
+
+Attachments grow by about a third when they're encoded for email, so a 6 MB
+PDF makes a message of about 8 MB. Validation measures every message as it
+will be sent:
+
+- A message larger than `--max-size` (`max_message_size=` in Python, default
+  25 MB, a common provider limit) fails validation for its row, and the error
+  names its attachments and their sizes. `--max-size 0` turns the check off.
+- Messages over 10 MB get one warning, since many receiving servers refuse
+  messages that size.
+- Once connected, the server's own limit, the `SIZE` in its EHLO reply, is
+  checked before the first message goes out. If any message of the run is
+  larger, the run stops with nothing sent, and the error lists those rows.
+  Without this check each oversized message would fail on its own, and a
+  server that checks the size only after receiving the message would be sent
+  the whole message every time.
+
+For large files, a link to a shared drive is often the better choice.
+
 ## Sending from Python
 
 ```python

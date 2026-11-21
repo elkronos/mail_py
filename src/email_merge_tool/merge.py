@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 
 TemplateLike = Template | str | Path
 
+#: Messages larger than this get a warning: many receiving servers refuse them.
+LARGE_MESSAGE = 10_000_000
+
 
 @dataclass
 class Result:
@@ -166,6 +169,7 @@ def mail_merge(
     allow_duplicates: bool = False,
     attachments: Sequence[str | Path] = (),
     attachment_field: str | None = None,
+    max_message_size: int | None = 25_000_000,
     output_dir: str | Path | None = None,
     progress: Callable[[Result], None] | None = None,
     max_consecutive_failures: int = 5,
@@ -227,6 +231,13 @@ def mail_merge(
         attachment_field: Column with per-recipient file path(s), separated
             by ``;`` (e.g. a personalised certificate). Paths may contain
             placeholders. Relative paths are resolved from the working directory.
+        max_message_size: The largest message allowed, in bytes, measured as
+            sent (attachments grow by about a third when encoded). A larger
+            message fails validation for its row, naming its attachments.
+            The default, 25 MB, is a common provider limit; ``None`` or ``0``
+            turns the check off. Many receiving servers set lower limits, so
+            messages over 10 MB get a warning. Once connected, the server's
+            own SIZE limit (from EHLO) is checked too, before the first send.
         output_dir: In a dry run, also write each message as a ``.eml`` file
             here (or pass ``transport=DryRunTransport(output_dir)``, not both).
         progress: Called with each :class:`Result` as it is produced.
@@ -277,6 +288,8 @@ def mail_merge(
         raise ValueError("limit must be >= 0")
     if max_consecutive_failures < 0:
         raise ValueError("max_consecutive_failures must be >= 0 (0 turns the check off)")
+    if max_message_size is not None and max_message_size < 0:
+        raise ValueError("max_message_size must be >= 0 (0 or None turns the check off)")
 
     extra = _extra_headers(extra_headers or {}, tpls)
     fields: set[str] = set().union(*(t.fields for t in tpls.values()), *(placeholders(v) for v in extra.values()))
@@ -374,7 +387,8 @@ def mail_merge(
     else:
         variants = [next(iter(tpls))] * len(records)
 
-    built: list[tuple[str, str, EmailMessage]] = []
+    built: list[tuple[str, str, EmailMessage, int]] = []  # To, variant, message, size as sent
+    large: list[tuple[int, int]] = []  # (row, size) of messages over LARGE_MESSAGE
     row_warnings: list[Issue] = []
     for row, (record, variant) in enumerate(zip(records, variants, strict=True), start=1):
         try:
@@ -408,16 +422,27 @@ def mail_merge(
                 one_click_unsubscribe=one_click_unsubscribe,
                 attachments=files,
             )
-            _check_writable(message)
+            size = _check_writable(message)
+            if max_message_size and size > max_message_size:
+                raise TemplateError(_too_large(size, max_message_size, files))
+            if size > LARGE_MESSAGE:
+                large.append((row, size))
         except MessageError as exc:
             errors.append(Issue(row, "error", f"the message cannot be written: {exc}"))
             continue
         except (TemplateError, ValueError, OSError) as exc:
             errors.append(Issue(row, "error", str(exc)))
             continue
-        built.append((rendered.to, variant, message))
+        built.append((rendered.to, variant, message, size))
     if errors:
         raise DataError(_describe(errors), errors)
+    if large:
+        row, size = max(large, key=lambda item: item[1])
+        note = (
+            f"{len(large)} message(s) are over {_mb(LARGE_MESSAGE)} (the largest, row {row}, is {_mb(size)}); "
+            "many receiving servers refuse messages that size, so consider linking to large files"
+        )
+        row_warnings.insert(0, Issue(None, "warning", note, where="message size"))
     for issue in row_warnings:
         logger.warning("%s", issue)
     report.issues += row_warnings
@@ -453,7 +478,11 @@ def mail_merge(
     finished = False
     try:
         _open(active)
-        for to, variant, message in built:
+        done = skip | already | bounced
+        _check_size_limit(
+            active, [(row, b[3]) for row, b in enumerate(built, 1) if normalize_address(b[0]) not in done]
+        )
+        for to, variant, message, _size in built:
             key = normalize_address(to)
             variant_label = variant if len(tpls) > 1 else None
             stop: FatalSendError | None = None
@@ -641,18 +670,53 @@ def _clash_note(name: str) -> str:
     return f"two attachments are named {name!r}; mail clients rename one of them or save one over the other"
 
 
-def _check_writable(message: EmailMessage) -> None:
+def _check_writable(message: EmailMessage) -> int:
     """Serialize ``message`` as delivery will, so a header that cannot be written stops the run before any send.
+
+    Returns:
+        The size of the message as sent, in bytes.
 
     Raises:
         MessageError: for any failure, with the standard library's reason.
     """
     try:
-        wire_bytes(message)
+        return len(wire_bytes(message))
     except MessageError:
         raise
     except Exception as exc:  # noqa: BLE001 - UnicodeEncodeError, RecursionError and others on odd input
         raise MessageError(str(exc) or type(exc).__name__) from exc
+
+
+def _mb(size: int) -> str:
+    return f"{size / 1_000_000:.1f} MB" if size >= 100_000 else f"{size:,} bytes"
+
+
+def _too_large(size: int, limit: int, files: Sequence[Path]) -> str:
+    """Why a message is too large for ``limit``, naming its attachments, largest first."""
+    sizes = sorted(((p.stat().st_size, p.name) for p in files), reverse=True)
+    listed = ", ".join(f"{name} ({_mb(n)})" for n, name in sizes) or "none"
+    return (
+        f"the message is {_mb(size)} as sent, over the {_mb(limit)} limit (max_message_size, --max-size); "
+        f"attachments: {listed}. Encoding makes attachments about a third larger; link to large files instead"
+    )
+
+
+def _check_size_limit(transport: Transport, sizes: Sequence[tuple[int, int]]) -> None:
+    """Stop before the first send if a message is larger than the transport's ``size_limit``.
+
+    ``sizes`` holds (row, size) for the messages this run would send.
+    """
+    limit = getattr(transport, "size_limit", None)
+    if not isinstance(limit, int) or limit <= 0:
+        return
+    over = [(row, size) for row, size in sizes if size > limit]
+    if over:
+        rows = ", ".join(f"row {row} ({_mb(size)})" for row, size in over[:10])
+        more = f" and {len(over) - 10} more" if len(over) > 10 else ""
+        raise FatalSendError(
+            f"the server accepts messages up to {_mb(limit)} (its SIZE limit), and {len(over)} message(s) are "
+            f"larger: {rows}{more}. Nothing was sent; make the attachments smaller or link to the files instead."
+        )
 
 
 def _deliver(

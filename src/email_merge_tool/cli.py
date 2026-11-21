@@ -83,6 +83,13 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--attach", action="append", default=[], metavar="FILE", help="attach FILE to every message")
     g.add_argument("--attachment-field", metavar="COLUMN", help="column with per-recipient file path(s), ';'-separated")
     g.add_argument("--allow-duplicates", action="store_true", help="allow an address on several rows")
+    g.add_argument(
+        "--max-size",
+        type=float,
+        default=25.0,
+        metavar="MB",
+        help="largest message allowed, as sent, in MB of 1,000,000 bytes (default 25; 0 for no limit)",
+    )
 
     g = p.add_argument_group("experiment")
     g.add_argument("--seed", help="random seed for assigning templates (required with several templates)")
@@ -190,6 +197,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--retry-bounced needs --resume: only a resumed run skips bounced addresses")
     if args.max_failures < 0:
         parser.error("--max-failures must be 0 (never stop) or more")
+    if args.max_size < 0:
+        parser.error("--max-size must be 0 (no limit) or more")
     sending = False
     try:
         if args.html and len(args.html) != len(args.template):
@@ -216,6 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             allow_duplicates=args.allow_duplicates,
             attachments=args.attach,
             attachment_field=args.attachment_field,
+            max_message_size=round(args.max_size * 1_000_000) or None,
         )
         # Always validate with a dry run first; it is also what --send confirms.
         preview = mail_merge(templates, args.data, dry_run=True, output_dir=args.output_dir, **common)
@@ -267,7 +277,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except FatalSendError as exc:
         print(f"error: {exc}", file=sys.stderr)
         if sending:
-            if exc.report is not None:
+            if exc.report is not None and exc.report.results:
                 done = len(exc.report.results)
                 print(f"Stopped after {done} of {total} recipient(s): {exc.report.summary()}.", file=sys.stderr)
             print(_resume_advice(args), file=sys.stderr)
