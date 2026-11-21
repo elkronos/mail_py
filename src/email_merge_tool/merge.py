@@ -98,6 +98,7 @@ class MergeReport:
 
 
 def _as_templates(templates: TemplateLike | Sequence[TemplateLike] | Mapping[str, TemplateLike]) -> dict[str, Template]:
+    items: list[tuple[str | None, TemplateLike]]
     if isinstance(templates, Mapping):
         items = [(name, t) for name, t in templates.items()]
     elif isinstance(templates, (Template, str, Path)):
