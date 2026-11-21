@@ -341,6 +341,47 @@ def _refused_account(error: smtplib.SMTPException, sender: str) -> AccountRefuse
     return None
 
 
+def _open_error(cfg: SMTPConfig, step: str, exc: BaseException) -> str:
+    """Explain a failure in :meth:`SMTPTransport.open` by the step it happened in."""
+    where = f"{cfg.host}:{cfg.port}"
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return (
+            f"login to {cfg.host} failed ({_reason(exc)}). For Gmail use an app password; "
+            "some providers (notably Microsoft) no longer accept passwords for SMTP."
+        )
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return (
+            f"the TLS certificate of {cfg.host} could not be verified ({exc.verify_message or exc}). "
+            "Check the host name, which must be one the certificate names."
+        )
+    if isinstance(exc, ssl.SSLError):
+        if step == "connect":  # implicit TLS starts while connecting
+            return (
+                f"TLS with {where} failed ({exc.reason or exc}). If this port expects STARTTLS "
+                "(usually 587), use --security starttls (security='starttls')."
+            )
+        return f"TLS with {where} failed after STARTTLS ({exc.reason or exc})."
+    if step == "starttls":
+        if isinstance(exc, smtplib.SMTPNotSupportedError):
+            return (
+                f"{where} does not offer STARTTLS, so the connection cannot be encrypted. For a relay "
+                "on a network you trust, use --security none (security='none'); messages then travel unencrypted."
+            )
+        return f"{where} failed during STARTTLS ({_reason(exc)})."
+    if step == "login":
+        if isinstance(exc, smtplib.SMTPNotSupportedError):
+            return (
+                f"{where} does not offer a login (no AUTH). For a relay that needs none, use --no-auth (username=None)."
+            )
+        return f"login to {cfg.host} failed ({_reason(exc)})."
+    if isinstance(exc, smtplib.SMTPConnectError):  # the greeting was not 220
+        return f"{where} refused the connection ({_reason(exc)})."
+    hint = "check the host name and port"
+    if cfg.port == 465 and cfg.security != "ssl":
+        hint = "port 465 usually expects implicit TLS, so use --security ssl (security='ssl')"
+    return f"could not connect to {where} ({_reason(exc)}); {hint}."
+
+
 class SMTPTransport:
     """Deliver over SMTP with TLS, automatic reconnection, and retries.
 
@@ -380,24 +421,34 @@ class SMTPTransport:
         self._smtp: smtplib.SMTP | None = None
 
     def open(self) -> None:
+        """Connect, start TLS and log in.
+
+        Raises:
+            FatalSendError: a step failed. The message names the step
+                (connecting, TLS or login) and what to try.
+        """
         cfg = self.config
         context = ssl.create_default_context()
+        smtp: smtplib.SMTP | None = None
+        step = "connect"
         try:
             if cfg.security == "ssl":
-                smtp: smtplib.SMTP = smtplib.SMTP_SSL(cfg.host, cfg.port, timeout=cfg.timeout, context=context)
+                smtp = smtplib.SMTP_SSL(cfg.host, cfg.port, timeout=cfg.timeout, context=context)
             else:
                 smtp = smtplib.SMTP(cfg.host, cfg.port, timeout=cfg.timeout)
                 if cfg.security == "starttls":
+                    step = "starttls"
                     smtp.starttls(context=context)
             if cfg.username:
+                step = "login"
                 smtp.login(cfg.username, cfg.password or "")
-        except smtplib.SMTPAuthenticationError as exc:
-            raise FatalSendError(
-                f"login to {cfg.host} failed ({exc.smtp_code}). For Gmail use an app password; "
-                "some providers (notably Microsoft) no longer accept passwords for SMTP."
-            ) from exc
         except (OSError, smtplib.SMTPException) as exc:
-            raise FatalSendError(f"could not connect to {cfg.host}:{cfg.port}: {exc}") from exc
+            if smtp is not None:
+                try:
+                    smtp.close()
+                except OSError:
+                    pass
+            raise FatalSendError(_open_error(cfg, step, exc)) from exc
         self._smtp = smtp
 
     def close(self) -> None:

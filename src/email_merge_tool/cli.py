@@ -89,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation before sending")
     g.add_argument("--service", choices=sorted(PRESETS), help="provider preset")
     g.add_argument("--host", help="SMTP host (instead of --service)")
-    g.add_argument("--port", type=int, help="SMTP port (default 587, or 465 with --security ssl)")
+    g.add_argument("--port", type=int, help="SMTP port (default 587; 465 with --security ssl, 25 with --security none)")
     g.add_argument("--security", choices=["ssl", "starttls", "none"], default="starttls")
     g.add_argument("--username", help="SMTP login (default: the --from address)")
     g.add_argument("--no-auth", action="store_true", help="do not log in (e.g. an internal relay on port 25)")
@@ -131,7 +131,7 @@ def _transport(args: argparse.Namespace) -> SMTPTransport:
     if args.service:
         config = SMTPConfig.from_service(args.service, username, password)
     elif args.host:
-        port = args.port or (465 if args.security == "ssl" else 587)
+        port = args.port or {"ssl": 465, "starttls": 587, "none": 25}[args.security]
         config = SMTPConfig(args.host, port, args.security, username, password)
     else:  # pragma: no cover - rejected in main() before anything happens
         raise ValueError("--send needs --service or --host")

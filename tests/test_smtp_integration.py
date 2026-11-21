@@ -243,9 +243,47 @@ def test_international_address_needs_smtputf8(serve, people, sleeps):
 
 def test_starttls_not_offered_stops_the_run(server, people):
     transport = SMTPTransport(SMTPConfig("127.0.0.1", server.port, "starttls"))
-    with pytest.raises(FatalSendError, match="STARTTLS"):
+    with pytest.raises(FatalSendError, match="does not offer STARTTLS") as info:
         mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=transport)
+    assert "--security none" in str(info.value) and "could not connect" not in str(info.value)
     assert server.count("MAIL") == 0
+
+
+def test_login_not_offered_suggests_no_auth(server):
+    transport = SMTPTransport(SMTPConfig("127.0.0.1", server.port, "none", username="team@example.org"))
+    with pytest.raises(FatalSendError, match="does not offer a login") as info:
+        transport.open()
+    assert "--no-auth" in str(info.value)
+
+
+def test_implicit_tls_against_a_plain_server_suggests_starttls(server):
+    transport = SMTPTransport(SMTPConfig("127.0.0.1", server.port, "ssl"))
+    with pytest.raises(FatalSendError, match="TLS with 127.0.0.1") as info:
+        transport.open()
+    assert "--security starttls" in str(info.value)
+
+
+def test_nothing_listening_is_a_connection_error():
+    port = _free_port()
+    transport = SMTPTransport(SMTPConfig("127.0.0.1", port, "none"))
+    with pytest.raises(FatalSendError, match=f"could not connect to 127.0.0.1:{port} .*check the host name and port"):
+        transport.open()
+
+
+def test_relay_recipes_from_the_cli_docs(server, people, tmp_path, monkeypatch):
+    from email_merge_tool.cli import main
+
+    monkeypatch.delenv("EMAIL_MERGE_PASSWORD", raising=False)
+    (tmp_path / "invite.txt").write_text("Subject: Hi {first_name}\n\nDear {first_name}\n", encoding="utf-8")
+    (tmp_path / "people.csv").write_text("email,first_name\nann@example.org,Ann\n", encoding="utf-8")
+    common = ["-t", str(tmp_path / "invite.txt"), "-d", str(tmp_path / "people.csv"), "--from", "me@example.org"]
+    relay = ["--host", "127.0.0.1", "--port", str(server.port), "--no-auth", "--send", "--yes"]
+
+    # This relay offers no STARTTLS, so the recipe that needs it stops with advice.
+    assert main([*common, *relay, "--log", str(tmp_path / "a.jsonl")]) == 2
+    assert server.count("MAIL") == 0
+    assert main([*common, *relay, "--security", "none", "--log", str(tmp_path / "b.jsonl")]) == 0
+    assert [d.rcpt_tos for d in server.delivered] == [["ann@example.org"]]
 
 
 @pytest.fixture

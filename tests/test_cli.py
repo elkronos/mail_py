@@ -176,3 +176,20 @@ def test_failures_in_a_row_stop_the_run_with_resume_advice(files, fake_smtp, cap
     assert main(_send_args(files, "--log", log, "--resume", "--max-failures", "0")) == 1  # failed, not stopped
     with pytest.raises(SystemExit):
         main(_send_args(files, "--log", log, "--max-failures", "-1"))
+
+
+def test_security_none_defaults_to_port_25(files, fake_smtp):
+    args = ["-t", str(files / "invite.txt"), "-d", str(files / "people.csv"), "--from", "t@example.org"]
+    assert (
+        main([*args, "--host", "relay.example.org", "--security", "none", "--no-auth", "--send", "--yes", "--no-log"])
+        == 0
+    )
+    assert [(c.port, c.tls) for c in fake_smtp.instances] == [(25, False)]
+
+
+def test_starttls_not_offered_explains_and_closes_the_connection(files, fake_smtp, capsys):
+    fake_smtp.features.discard("starttls")
+    assert main(_send_args(files, "--no-log")) == 2
+    err = capsys.readouterr().err
+    assert "relay.example.org:587 does not offer STARTTLS" in err and "--security none" in err
+    assert fake_smtp.instances[0].closed

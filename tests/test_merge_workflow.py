@@ -558,3 +558,13 @@ def test_failures_in_a_row_stop_with_the_fake(people, fake_smtp, tmp_path):
             max_consecutive_failures=2,
         )
     assert [r["status"] for r in read_log(tmp_path / "l")] == ["failed", "failed"]
+
+
+def test_starttls_on_port_465_times_out_with_a_hint(monkeypatch):
+    def hang(host, port, timeout=None):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(smtplib, "SMTP", hang)
+    transport = SMTPTransport(SMTPConfig("smtp.example.org", 465, "starttls"))
+    with pytest.raises(FatalSendError, match=r"could not connect to smtp.example.org:465 \(timed out\); port 465"):
+        transport.open()

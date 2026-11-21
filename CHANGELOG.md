@@ -19,8 +19,10 @@
 - Dry-run `.eml` files are the bytes that go over SMTP, with CRLF line endings, and are UTF-8 when an address needs SMTPUTF8. Such an address used to stop the dry run with `UnicodeEncodeError`.
 - A row whose `To` address the server refuses is logged as `failed`, and resume retries it, even when a `Cc` or `Bcc` on the row was accepted. It used to be logged as `sent`, so resume skipped that person for good. A temporary refusal of the `To` address is retried for the refused addresses only, so the others do not get a second copy.
 - Temporary (4xx) refusals of a recipient, such as greylisting, are retried with backoff like other temporary failures, as the documentation said. They used to fail at once. After a 421 at that stage the next message no longer waits through a backoff.
+- Connection errors name the step that failed. A server without STARTTLS, a server without a login, a TLS handshake or certificate failure and a refused login each get their own message with the option to try (`--security none`, `--no-auth`, `--security starttls`); all of them used to read "could not connect". A connection that fails partway is closed. The documented port-25 relay recipe failed on relays without STARTTLS; `docs/cli.md` now shows both cases.
 
 ### Changed
+- With `--security none`, `--port` defaults to 25 instead of 587.
 - `email-merge --send` requires `--log FILE`, or `--no-log` to send without one.
 - New result and log status `uncertain`, new exception `UncertainSendError`, and `MergeReport.uncertain`. The CLI exits with 1 when any message is uncertain.
 - Addresses with non-ASCII characters before the `@` are rejected at validation on every Python version. Python 3.15 had started accepting them, which sent them only through servers offering SMTPUTF8.

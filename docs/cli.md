@@ -32,7 +32,7 @@ Without `--send`, the command validates everything, prints the first message
 | `--send` | Send for real. Requires `--log FILE` or `--no-log`. |
 | `-y, --yes` | Skip the confirmation prompt. |
 | `--service NAME` | `gmail`, `outlook` or `office365`. |
-| `--host`, `--port`, `--security` | A custom SMTP server. `--security` is `ssl`, `starttls` (default) or `none`. |
+| `--host`, `--port`, `--security` | A custom SMTP server. `--security` is `ssl`, `starttls` (default) or `none`. The port defaults to 587, or 465 with `ssl` and 25 with `none`. |
 | `--username` | SMTP login (default: the `--from` address). |
 | `--no-auth` | Don't log in (for example, an internal relay). |
 | `--log FILE` | JSON Lines send log. Required with `--send`. If the file already records sent messages, the run is refused unless you add `--resume`. |
@@ -67,8 +67,12 @@ email-merge -t invite.txt -d people.csv --from me@example.org --preview 5 --outp
 email-merge -t invite.txt -d people.csv --from me@gmail.com --service gmail \
     --send --log invite.jsonl --limit 450      # add --resume from the second day on
 
-# Institutional relay on port 25 without authentication
+# Institutional relay on port 25 without a login; the relay must offer STARTTLS
 email-merge -t invite.txt -d people.csv --from me@uni.edu --host smtp.uni.edu --port 25 --no-auth \
+    --send --log invite.jsonl
+
+# A relay on a network you trust that offers no TLS (port 25 by default; nothing is encrypted)
+email-merge -t invite.txt -d people.csv --from me@uni.edu --host relay.lab.local --security none --no-auth \
     --send --log invite.jsonl
 
 # Two-arm experiment stratified by department, 2:1 allocation

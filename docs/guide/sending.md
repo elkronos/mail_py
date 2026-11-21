@@ -46,6 +46,11 @@ Postmark, Mailgun, SendGrid and others) or an institutional relay gives better
 deliverability and higher limits. All of them offer SMTP, so use `--host`,
 `--port` and `--username`.
 
+A relay that needs no login takes `--no-auth`. If it doesn't offer STARTTLS,
+the run stops before sending anything; on a network you trust, add
+`--security none` (the port then defaults to 25), and the messages travel
+unencrypted.
+
 ## Passwords
 
 - The CLI reads the password from the `EMAIL_MERGE_PASSWORD` environment
@@ -75,7 +80,9 @@ deliverability and higher limits. All of them offer SMTP, so use `--host`,
 - **Permanent** failures for one recipient (5xx) are recorded as `failed`, and
   the run continues.
 - **Fatal** failures (can't connect, login rejected) stop the run with a clear
-  message. Use `--resume` afterwards.
+  message. Use `--resume` afterwards. The message names the step that failed
+  (connecting, TLS or login) and what to try, such as `--security none` for
+  a relay without STARTTLS or `--no-auth` for one without a login.
 - **Account-level** refusals stop the run at once, because every remaining
   message would meet them too: a daily quota (Gmail's `550 5.4.5`,
   Microsoft's `SubmissionQuotaExceeded`), a `4.7.x` or `5.7.x` reply about a
