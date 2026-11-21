@@ -127,6 +127,29 @@ need no server extension. A message built elsewhere with 8-bit text is
 declared with `BODY=8BITMIME` (RFC 6152), and a server that doesn't offer
 8BITMIME gets those parts encoded as base64 instead.
 
+## Bounce address (envelope sender)
+
+Bounces go to the envelope sender, the address given in SMTP's `MAIL FROM`,
+which the receiving server records as `Return-Path`. By default that is the
+`Sender` address, or else the `From` address, so bounces land in the inbox of
+the person named in `From`. To collect them at a monitored address instead,
+set `--envelope-from` (`envelope_from=` in Python):
+
+```bash
+email-merge ... --from "Lab <lab@uni.example>" --envelope-from "bounces+{id}@uni.example" --send --log invite.jsonl
+```
+
+Placeholders are allowed, so each message can carry its own bounce address
+(VERP), and a bounce then names the recipient it belongs to. Every filled-in
+value must be one valid address, or validation fails for its row. The headers
+of the message don't change.
+
+Submission servers such as Gmail's and Microsoft 365's may replace the
+envelope sender with the account's own address, or refuse one the account
+may not send as. A refusal stops the run before anything is sent, naming the
+envelope sender. A separate bounce address is mostly useful with a relay or a
+sending service that lets you choose it.
+
 ## Message size
 
 Attachments grow by about a third when they're encoded for email, so a 6 MB
@@ -228,7 +251,10 @@ smtp_error="5.1.1 ...")` to have it recorded as `bounced`. `mail_merge`
 doesn't retry anything itself, so `send` should retry throttling and
 connection errors that happened before the request went out. A transport that
 only previews sets `delivers = False`, like `DryRunTransport`, and every run
-with it is a dry run.
+with it is a dry run. To take `envelope_from=`, `send` accepts it as a keyword
+argument, `send(message, envelope_from=None)`, and uses it as the bounce
+address. A transport may also set `size_limit` (bytes) in `open()`, and the
+run stops before its first send if a message is larger.
 
 This transport posts each message to an HTTP API (the endpoint and fields are
 placeholders) and maps each outcome to the table above. It is in the

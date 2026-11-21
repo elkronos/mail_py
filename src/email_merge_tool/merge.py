@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -14,6 +15,7 @@ from pathlib import Path
 from .data import (
     DataError,
     Issue,
+    _parse_mailbox,
     _valid_address_list,
     is_valid_address,
     load_address_list,
@@ -149,6 +151,7 @@ def mail_merge(
     recipients: object,
     *,
     sender: str | None = None,
+    envelope_from: str | None = None,
     transport: Transport | None = None,
     dry_run: bool = True,
     to_field: str = "email",
@@ -189,6 +192,12 @@ def mail_merge(
         recipients: CSV/JSON path, list of dicts, or pandas DataFrame.
         sender: From address (``"Name <addr>"``). Required unless every
             template sets ``From:``.
+        envelope_from: Envelope sender (SMTP ``MAIL FROM``, which becomes
+            the ``Return-Path``), the address bounces go to, when it should
+            differ from ``Sender`` or ``From``. Placeholders are allowed, as
+            in ``"bounces+{id}@example.org"``, and each filled-in value must
+            be one valid address. Needs a transport whose ``send`` takes
+            ``envelope_from``, as :class:`SMTPTransport`'s does.
         transport: e.g. ``SMTPTransport(SMTPConfig.from_service("gmail", user, pw))``,
             or your own; see :class:`Transport`. It is used only with
             ``dry_run=False``, and a warning says so otherwise. A transport
@@ -280,6 +289,11 @@ def mail_merge(
     if previewer and output_dir is not None:
         raise ValueError("pass output_dir= or a DryRunTransport, not both: each says where the dry run writes")
     dry_run = dry_run or previewer
+    if envelope_from and not dry_run and transport is not None and not _takes_envelope_from(transport):
+        raise ValueError(
+            f"envelope_from needs a transport whose send() takes envelope_from, and {type(transport).__name__}'s "
+            "does not (SMTPTransport's does)"
+        )
     if seed is not None and variant_field is not None:
         raise ValueError("use either seed (random assignment) or variant_field (pre-assigned), not both")
     if len(tpls) > 1 and seed is None and variant_field is None:
@@ -295,6 +309,8 @@ def mail_merge(
     fields: set[str] = set().union(*(t.fields for t in tpls.values()), *(placeholders(v) for v in extra.values()))
     if list_unsubscribe:
         fields |= placeholders(list_unsubscribe)
+    if envelope_from:
+        fields |= placeholders(envelope_from)
     if strata:
         fields |= {strata} if isinstance(strata, str) else set(strata)
     if variant_field:
@@ -387,7 +403,7 @@ def mail_merge(
     else:
         variants = [next(iter(tpls))] * len(records)
 
-    built: list[tuple[str, str, EmailMessage, int]] = []  # To, variant, message, size as sent
+    built: list[tuple[str, str, EmailMessage, int, str | None]] = []  # To, variant, message, size, envelope
     large: list[tuple[int, int]] = []  # (row, size) of messages over LARGE_MESSAGE
     row_warnings: list[Issue] = []
     for row, (record, variant) in enumerate(zip(records, variants, strict=True), start=1):
@@ -404,6 +420,7 @@ def mail_merge(
                 if value and not _valid_address_list(value):
                     raise TemplateError(f"invalid address in {name}: {value!r}")
             unsub = fill(list_unsubscribe, record) if list_unsubscribe else None
+            envelope = _envelope_sender(fill(envelope_from, record)) if envelope_from else None
             files = [Path(p) for p in attachments]
             if attachment_field:
                 files += [Path(fill(p.strip(), record)) for p in record[attachment_field].split(";") if p.strip()]
@@ -433,7 +450,7 @@ def mail_merge(
         except (TemplateError, ValueError, OSError) as exc:
             errors.append(Issue(row, "error", str(exc)))
             continue
-        built.append((rendered.to, variant, message, size))
+        built.append((rendered.to, variant, message, size, envelope))
     if errors:
         raise DataError(_describe(errors), errors)
     if large:
@@ -475,6 +492,7 @@ def mail_merge(
         active = transport
     delivered = attempted = 0
     consecutive = 0  # failed messages in a row, not counting bad addresses
+    takes_envelope = envelope_from is not None and _takes_envelope_from(active)
     finished = False
     try:
         _open(active)
@@ -482,7 +500,7 @@ def mail_merge(
         _check_size_limit(
             active, [(row, b[3]) for row, b in enumerate(built, 1) if normalize_address(b[0]) not in done]
         )
-        for to, variant, message, _size in built:
+        for to, variant, message, _size, envelope in built:
             key = normalize_address(to)
             variant_label = variant if len(tpls) > 1 else None
             stop: FatalSendError | None = None
@@ -502,7 +520,8 @@ def mail_merge(
                 attempted += 1
                 counts = False
                 try:
-                    result, counts = _deliver(active, message, to, variant_label, dry_run)
+                    envelope = envelope if takes_envelope else None  # a dry-run previewer may not take it
+                    result, counts = _deliver(active, message, to, variant_label, dry_run, envelope)
                 except FatalSendError as exc:  # e.g. a quota or a failed reconnect: this one was not sent
                     # An unexpected exception from a transport says nothing about whether it was sent.
                     status = "uncertain" if isinstance(exc, TransportError) else "failed"
@@ -719,14 +738,39 @@ def _check_size_limit(transport: Transport, sizes: Sequence[tuple[int, int]]) ->
         )
 
 
+def _takes_envelope_from(transport: object) -> bool:
+    """Whether ``transport.send`` accepts an ``envelope_from`` keyword argument."""
+    try:
+        parameters = inspect.signature(transport.send).parameters.values()  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return any(p.name == "envelope_from" or p.kind is p.VAR_KEYWORD for p in parameters)
+
+
+def _envelope_sender(value: str) -> str:
+    """The address in an ``envelope_from`` value, or TemplateError if it is not one valid address."""
+    address, problem = _parse_mailbox(value)
+    if address is None:
+        raise TemplateError(f"invalid envelope sender (envelope_from) {value!r}: {problem}")
+    return address.addr_spec
+
+
 def _deliver(
-    transport: Transport, message: EmailMessage, to: str, variant: str | None, dry_run: bool
+    transport: Transport,
+    message: EmailMessage,
+    to: str,
+    variant: str | None,
+    dry_run: bool,
+    envelope_from: str | None = None,
 ) -> tuple[Result, bool]:
     """Send one message. Also says whether a failure counts toward ``max_consecutive_failures``."""
     message_id = str(message["Message-ID"])
     stamp_date(message)  # the send time, not the build time, which can be hours earlier
     try:
-        returned = transport.send(message)
+        if envelope_from is not None:  # only for a transport that takes it
+            returned = transport.send(message, envelope_from=envelope_from)  # type: ignore[call-arg]
+        else:
+            returned = transport.send(message)
     except UncertainSendError as exc:
         logger.warning("delivery to %s is uncertain: %s", to, exc)
         code, text = _error_reply(exc)

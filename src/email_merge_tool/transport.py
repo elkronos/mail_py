@@ -188,6 +188,9 @@ class Transport(Protocol):
     ``send`` should retry temporary failures itself; ``mail_merge`` does not.
     A transport that only previews sets the attribute ``delivers = False``,
     as :class:`DryRunTransport` does, and ``mail_merge`` then runs a dry run.
+    A transport that can set the envelope sender (where bounces go) takes
+    it as a keyword argument, ``send(message, envelope_from=None)``, as
+    :class:`SMTPTransport` does; ``mail_merge(envelope_from=...)`` needs one.
     A transport that knows the largest message it can send sets
     ``size_limit`` (bytes) by the end of ``open()``, as
     :class:`SMTPTransport` does from the server's EHLO SIZE; ``mail_merge``
@@ -428,8 +431,13 @@ def _reply(error: BaseException, main: set[str]) -> tuple[int | None, str]:
     return None, ""
 
 
-def _refused_account(error: smtplib.SMTPException, sender: str) -> AccountRefusedError | None:
-    """An :class:`AccountRefusedError` if a reply in ``error`` refuses the account."""
+def _refused_account(
+    error: smtplib.SMTPException, sender: str, *, envelope: bool = False
+) -> AccountRefusedError | None:
+    """An :class:`AccountRefusedError` if a reply in ``error`` refuses the account.
+
+    ``envelope`` says the sender was given as ``envelope_from``, not taken from the headers.
+    """
     if isinstance(error, smtplib.SMTPRecipientsRefused):
         replies = [(code, _text(text)) for code, text in error.recipients.values()]
     elif isinstance(error, smtplib.SMTPResponseException):
@@ -439,7 +447,8 @@ def _refused_account(error: smtplib.SMTPException, sender: str) -> AccountRefuse
     for code, text in replies:
         why = _account_refusal(code, text)
         if why is None and isinstance(error, smtplib.SMTPSenderRefused) and 500 <= code < 600 and code != 552:
-            why = f"It refuses the sender address {sender}; check the From address."
+            check = "the envelope sender (envelope_from, --envelope-from)" if envelope else "the From address"
+            why = f"It refuses the sender address {sender}; check {check}."
         if why is not None:
             return AccountRefusedError(
                 f"the server refused mail from this account ({code} {text}). {why}", smtp_code=code, smtp_error=text
@@ -588,8 +597,15 @@ class SMTPTransport:
                 pass
             self._smtp = None
 
-    def send(self, message: EmailMessage) -> dict[str, tuple[int, bytes]]:
+    def send(self, message: EmailMessage, *, envelope_from: str | None = None) -> dict[str, tuple[int, bytes]]:
         """Send one message.
+
+        Args:
+            message: The message. Its ``To``, ``Cc`` and ``Bcc`` addresses
+                are the recipients.
+            envelope_from: The envelope sender (``MAIL FROM``), where bounces
+                go. By default it is the ``Sender`` address, or else the
+                ``From`` address.
 
         Returns:
             Recipients the server refused while accepting the message for the
@@ -611,6 +627,9 @@ class SMTPTransport:
         attempt = 0
         self.unconfirmed = False
         sender, pending, main = _envelope(message)
+        if envelope_from is not None:
+            sender = envelope_from
+        envelope = envelope_from is not None
         refused: dict[str, tuple[int, bytes]] = {}  # for good, while others were sent the message
         delivered = False  # the server has taken the message for at least one recipient
         error: Exception
@@ -628,7 +647,7 @@ class SMTPTransport:
             except smtplib.SMTPRecipientsRefused as exc:  # nobody was sent the message this time
                 if any(code == 421 for code, _ in exc.recipients.values()):
                     self.close()  # smtplib has already dropped the connection
-                if account := _refused_account(exc, sender):
+                if account := _refused_account(exc, sender, envelope=envelope):
                     raise account from exc
                 permanent = {address: reply for address, reply in exc.recipients.items() if not _temporary(reply)}
                 if permanent.keys() & main or len(permanent) == len(exc.recipients):
@@ -643,7 +662,7 @@ class SMTPTransport:
             except smtplib.SMTPResponseException as exc:
                 if exc.smtp_code == 421:
                     self.close()  # the server is closing the connection
-                if account := _refused_account(exc, sender):
+                if account := _refused_account(exc, sender, envelope=envelope):
                     raise account from exc
                 if 500 <= exc.smtp_code < 600:
                     raise PermanentSendError(
@@ -686,7 +705,9 @@ class SMTPTransport:
             else:
                 delivered = True
                 missed = {address: reply for address, reply in result.items() if address in main}
-                if missed and (account := _refused_account(smtplib.SMTPRecipientsRefused(missed), sender)):
+                if missed and (
+                    account := _refused_account(smtplib.SMTPRecipientsRefused(missed), sender, envelope=envelope)
+                ):
                     raise account  # the main recipient did not get it; a Cc or Bcc did
                 retry = {address: reply for address, reply in result.items() if _temporary(reply)}
                 if not retry.keys() & main:
@@ -765,7 +786,8 @@ class DryRunTransport:
         except OSError as exc:
             raise FatalSendError(f"cannot write the dry-run messages to {self.output_dir}: {exc}") from exc
 
-    def send(self, message: EmailMessage) -> dict[str, tuple[int, bytes]]:
+    def send(self, message: EmailMessage, *, envelope_from: str | None = None) -> dict[str, tuple[int, bytes]]:
+        """Collect ``message`` and write its ``.eml`` file; ``envelope_from`` is accepted and not recorded."""
         self.messages.append(message)
         if self.output_dir is not None:
             if self._manifest is None:

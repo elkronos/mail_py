@@ -791,3 +791,50 @@ def test_large_messages_get_one_warning(people, tmp_path, monkeypatch):
     notes = [str(i) for i in report.issues if i.where == "message size"]
     assert len(notes) == 1
     assert notes[0].startswith("warning: message size: 2 message(s) are over 2,000 bytes (the largest, row 3, is ")
+
+
+def test_envelope_from_is_validated_for_every_row(people):
+    rows = [dict(p, id="4 4" if p["id"] == "4" else p["id"]) for p in people]
+    with pytest.raises(DataError) as info:
+        mail_merge(TPL, rows, sender=SENDER, envelope_from="bounces+{id}@example.org")
+    assert [str(i) for i in info.value.issues] == [
+        "error: row 4: invalid envelope sender (envelope_from) 'bounces+4 4@example.org': "
+        "unexpected text or punctuation around the address"
+    ]
+    with pytest.raises(DataError, match="row 1: invalid envelope sender"):
+        mail_merge(TPL, people, sender=SENDER, envelope_from="bounces")
+    with pytest.raises(DataError, match="campaign"):
+        mail_merge(TPL, people, sender=SENDER, envelope_from="bounces+{campaign}@example.org")
+
+
+def test_envelope_from_needs_a_transport_that_takes_it(people, fake_smtp):
+    class Plain:
+        def open(self):
+            pass
+
+        def send(self, message):
+            pass
+
+        def close(self):
+            pass
+
+    class Flexible(Plain):
+        envelopes = []
+
+        def send(self, message, **options):
+            self.envelopes.append(options["envelope_from"])
+
+    with pytest.raises(ValueError, match="envelope_from needs a transport whose send\\(\\) takes envelope_from"):
+        mail_merge(TPL, people, sender=SENDER, dry_run=False, transport=Plain(), envelope_from="b@example.org")
+    mail_merge(TPL, people[:2], sender=SENDER, dry_run=False, transport=Flexible(), envelope_from="b+{id}@example.org")
+    assert Flexible.envelopes == ["b+1@example.org", "b+2@example.org"]
+
+    class Preview(Plain):
+        delivers = False
+
+    report = mail_merge(TPL, people, sender=SENDER, transport=Preview(), envelope_from="b@example.org")  # a dry run
+    assert report.count("dry_run") == 4
+    mail_merge(
+        TPL, people[:1], sender=SENDER, dry_run=False, transport=gmail(), envelope_from="Bounces <b@example.org>"
+    )
+    assert fake_smtp.instances[0].envelopes[0][0] == "b@example.org"

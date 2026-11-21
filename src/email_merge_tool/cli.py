@@ -70,6 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--to-field", default="email", metavar="COLUMN", help="address column (default: email)")
     g.add_argument("--from", dest="sender", metavar="ADDRESS", help='sender, e.g. "Lab <lab@example.org>"')
     g.add_argument(
+        "--envelope-from",
+        "--return-path",
+        dest="envelope_from",
+        metavar="ADDRESS",
+        help="envelope sender (MAIL FROM) that receives bounces, e.g. bounces+{id}@example.org; placeholders allowed",
+    )
+    g.add_argument(
         "--list-unsubscribe", metavar="VALUE", help='List-Unsubscribe header, e.g. "<https://example.org/u?id={id}>"'
     )
     g.add_argument("--one-click", action="store_true", help="add RFC 8058 one-click unsubscribe header")
@@ -208,6 +215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         weights = [float(w) for w in args.weights.split(",")] if args.weights else None
         common = dict(
             sender=args.sender,
+            envelope_from=args.envelope_from,
             to_field=args.to_field,
             seed=args.seed,
             strata=args.strata,

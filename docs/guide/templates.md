@@ -36,7 +36,8 @@ Dear {first_name},
 - `Sender` names the mailbox that sends when `From` is someone else,
   such as a department address you send on behalf of. It must be one valid
   address. The SMTP transport also uses it as the envelope sender, so bounces
-  go to it.
+  go to it, unless `--envelope-from` (`envelope_from=`) names another
+  [bounce address](sending.md#bounce-address-envelope-sender).
 
 ## Provider and custom headers
 

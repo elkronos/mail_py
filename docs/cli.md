@@ -19,6 +19,7 @@ Without `--send`, the command validates everything, prints the first message
 | `-d, --data FILE` | Recipients, `.csv` or `.json`. |
 | `--to-field COLUMN` | Address column (default `email`). |
 | `--from ADDRESS` | Sender, e.g. `"Lab <lab@example.org>"`. Not needed if the template has `From:`, which replaces it (with a warning when they differ). |
+| `--envelope-from ADDRESS` | Envelope sender (`MAIL FROM`), where bounces go, e.g. `bounces+{id}@example.org`. Placeholders are allowed. Also spelled `--return-path`. |
 | `--list-unsubscribe VALUE` | `List-Unsubscribe` header: one or more `<URI>` values separated by commas. Placeholders are allowed. |
 | `--one-click` | Add the RFC 8058 `List-Unsubscribe-Post` header (needs an `https` URI). |
 | `--header 'NAME: VALUE'` | Add a header to every message, such as `Feedback-ID` or an `X-` header. Placeholders are allowed. Repeatable. See [provider and custom headers](guide/templates.md#provider-and-custom-headers). |

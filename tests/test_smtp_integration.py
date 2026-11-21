@@ -627,3 +627,18 @@ def test_unknown_mailboxes_bounce_and_resume_skips_them(server, people, sleeps, 
 
     fixed = send(server, people, template=ARCHIVED, tmp_path=tmp_path, resume=True, retry_bounced=True)
     assert [r.status for r in fixed.results] == ["sent", "sent", "skipped", "skipped"]
+
+
+def test_envelope_from_sets_mail_from_and_nothing_else(server, people, sleeps):
+    tpl = Template(subject="s", text="t", headers={"Sender": "office@example.org"})
+    send(server, people[:2], template=tpl, envelope_from="bounces+{id}@example.org")
+    assert [d.mail_from for d in server.delivered] == ["bounces+1@example.org", "bounces+2@example.org"]
+    message = server.delivered[0].message
+    assert (message["From"], message["Sender"], message["Return-Path"]) == (SENDER, "office@example.org", None)
+
+
+def test_a_refused_envelope_sender_stops_the_run(server, people, sleeps):
+    server.mail = ["553 5.7.1 Sender address rejected: not owned by user"]
+    with pytest.raises(AccountRefusedError, match=r"bounces@example.org; check the envelope sender \(envelope_from"):
+        send(server, people, envelope_from="bounces@example.org")
+    assert server.delivered == []

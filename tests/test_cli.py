@@ -235,3 +235,10 @@ def test_max_size_limits_messages(files, fake_smtp, capsys):
     assert main([*args, "--attach", str(files / "big.bin"), "--max-size", "0"]) == 0
     with pytest.raises(SystemExit):
         main([*args, "--max-size", "-1"])
+
+
+@pytest.mark.parametrize("option", ["--envelope-from", "--return-path"])
+def test_envelope_from_option(files, fake_smtp, option):
+    assert main(_send_args(files, "--no-log", option, "bounces@example.org")) == 0
+    assert [e[0] for e in fake_smtp.instances[0].envelopes] == ["bounces@example.org"] * 2
+    assert all(m["From"] == "t@example.org" for m in fake_smtp.instances[0].sent)
