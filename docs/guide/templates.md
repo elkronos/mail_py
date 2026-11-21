@@ -22,6 +22,11 @@ Dear {first_name},
 - Files are read as UTF-8, and a byte-order mark is ignored.
 - Files ending in `.html` or `.htm` are HTML bodies. Everything else is plain text.
 - `To` always comes from the data (the `email` column, or `--to-field`).
+- `From` in the template replaces `sender=` (`--from`), and validation warns
+  when the two differ. Whichever is used must be exactly one valid address for
+  every row: a `From: {owner}` placeholder whose cell is empty (with no
+  `sender=` to fall back on) or that holds two addresses fails validation.
+- The `Subject` must not be blank once its placeholders are filled in.
 - `Bcc` recipients get the message but the header is removed before sending, as
   the SMTP standard requires. They are not hidden from the send log.
 

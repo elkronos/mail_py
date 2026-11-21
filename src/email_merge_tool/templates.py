@@ -135,7 +135,8 @@ class Template:
 
         Raises:
             TemplateError: if a placeholder has no value, the recipient address
-                is missing, or a header would contain a line break.
+                is missing, a header would contain a line break, or the
+                subject is blank.
         """
         if to_field not in record or not str(record[to_field] or "").strip():
             raise TemplateError(f"record has no value in the address column {to_field!r}")
@@ -145,6 +146,8 @@ class Template:
         for name, value in [("To", to), ("Subject", subject), *headers.items()]:
             if "\r" in value or "\n" in value:
                 raise TemplateError(f"{name} header would contain a line break (possible header injection)")
+        if not subject.strip():
+            raise TemplateError("the Subject is empty once the placeholders are filled in")
         html_body = fill(self.html, record, escape_html=True) if self.html is not None else None
         if self.text is not None:
             text_body = fill(self.text, record, escape_html=False)

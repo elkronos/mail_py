@@ -262,6 +262,10 @@ def mail_merge(
         issues.insert(0, Issue(None, "error", f"invalid sender address {sender!r}"))
     if not sender and any("From" not in t.headers for t in tpls.values()):
         issues.insert(0, Issue(None, "error", "no sender: pass sender= or add a 'From:' header to the template"))
+    for tpl in tpls.values():
+        if sender and tpl.headers.get("From", sender) != sender:
+            note = f"its From: {tpl.headers['From']!r} replaces sender={sender!r}"
+            issues.append(Issue(None, "warning", note, where=f"template {tpl.name!r}"))
     for path in attachments:
         if not Path(path).is_file():
             issues.append(Issue(None, "error", f"attachment not found: {path}"))

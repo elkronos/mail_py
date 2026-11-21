@@ -18,7 +18,7 @@ from email_merge_tool import (
     build_message,
     mail_merge,
 )
-from email_merge_tool.message import attachment_name, needs_smtputf8, wire_bytes
+from email_merge_tool.message import attachment_name, message_id, needs_smtputf8, wire_bytes
 from email_merge_tool.templates import RenderedMessage
 
 SENDER = "Study Team <team@example.org>"
@@ -292,3 +292,47 @@ def test_duplicate_attachment_names_warn(people, tmp_path):
         (4, "warning"),
     ]
     assert "'Report.PDF'" in per_row.issues[0].message
+
+
+def test_from_must_be_exactly_one_mailbox(people, fake_smtp, tmp_path):
+    tpl = Template(subject="s", text="t", headers={"From": "{boss}"})
+    rows = [dict(p, boss="Lab <lab@example.org>") for p in people]
+    rows[1]["boss"] = ""  # used to go out with an empty From and MAIL FROM:<>
+    rows[2]["boss"] = "a@example.org, b@example.org"  # several mailboxes need a Sender header
+    transport = SMTPTransport(SMTPConfig("smtp.example.org", 587, username="u", password="p"))
+    with pytest.raises(DataError) as info:
+        mail_merge(tpl, rows, dry_run=False, transport=transport, log_path=tmp_path / "log")
+    assert [str(i) for i in info.value.issues] == [
+        "error: row 2: no From address: the template's From is empty here and no sender was given",
+        "error: row 3: From must be exactly one valid address, got 'a@example.org, b@example.org' "
+        "(more than one address)",
+    ]
+    assert fake_smtp.instances == []
+
+
+def test_template_from_that_replaces_sender_is_reported(people):
+    tpl = Template(subject="s", text="t", headers={"From": "Dean <dean@example.org>"}, name="memo")
+    report = mail_merge(tpl, people, sender=SENDER)
+    assert [str(i) for i in report.issues] == [
+        "warning: template 'memo': its From: 'Dean <dean@example.org>' replaces sender='Study Team <team@example.org>'"
+    ]
+    assert report.messages[0]["From"] == "Dean <dean@example.org>"
+    assert mail_merge(Template(subject="s", text="t", headers={"From": SENDER}), people, sender=SENDER).issues == []
+
+
+def test_blank_subject_fails_its_row(people):
+    tpl = Template(subject="{topic}", text="t")
+    rows = [dict(p, topic="News") for p in people]
+    rows[3]["topic"] = "  "
+    with pytest.raises(DataError, match="row 4: the Subject is empty once the placeholders are filled in"):
+        mail_merge(tpl, rows, sender=SENDER)
+
+
+def test_message_id_is_random_and_uses_the_from_domain(monkeypatch):
+    monkeypatch.setattr("socket.getfqdn", lambda name="": pytest.fail("Message-ID must not use the host name"))
+    first = build_message(rendered(), sender="Team <team@Example.ORG>")["Message-ID"]
+    second = build_message(rendered(), sender="Team <team@Example.ORG>")["Message-ID"]
+    assert re.fullmatch(r"<[0-9a-f]{32}@example\.org>", first) and first != second
+    assert re.fullmatch(r"<[0-9a-f]{32}@xn--mnchen-3ya\.de>", message_id("münchen.de"))
+    with pytest.raises(ValueError, match="IDNA"):
+        message_id("x" * 64 + ".de")

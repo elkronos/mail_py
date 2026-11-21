@@ -9,6 +9,7 @@ import io
 import mimetypes
 import quopri
 import re
+import secrets
 import unicodedata
 import urllib.parse
 from collections.abc import Sequence
@@ -18,13 +19,22 @@ from email.headerregistry import BaseHeader, HeaderRegistry
 from email.message import EmailMessage, Message
 from email.policy import EmailPolicy, Policy
 from email.policy import default as _default_policy
-from email.utils import formatdate, getaddresses, make_msgid, parseaddr
+from email.utils import formatdate, getaddresses
 from pathlib import Path
 from typing import Any
 
+from .data import _parse_mailbox
 from .templates import RenderedMessage
 
-__all__ = ["POLICY", "attachment_name", "attachment_type", "build_message", "needs_smtputf8", "wire_bytes"]
+__all__ = [
+    "POLICY",
+    "attachment_name",
+    "attachment_type",
+    "build_message",
+    "message_id",
+    "needs_smtputf8",
+    "wire_bytes",
+]
 
 # RFC 5322 section 2.1.1: a header line, name included, may not exceed 998 characters.
 _MAX_LINE = 998
@@ -293,7 +303,9 @@ def build_message(
     Args:
         rendered: Output of :meth:`Template.render`.
         sender: From address, e.g. ``"Study Team <team@example.org>"``. A
-            ``From`` header in the template overrides it.
+            ``From`` header in the template overrides it. The ``From`` used
+            must be exactly one valid address; its domain is also the domain
+            of the ``Message-ID``.
         list_unsubscribe: Already-rendered value for the ``List-Unsubscribe``
             header (RFC 2369), e.g. ``"<https://example.org/u?id=42>"``: one
             or more ASCII URIs in angle brackets, separated by commas. It is
@@ -306,9 +318,20 @@ def build_message(
         attachments: Files to attach. The MIME type comes from the file
             extension (see :func:`attachment_type`), and text files that are
             valid UTF-8 are labelled ``charset="utf-8"``.
+
+    Raises:
+        ValueError: the ``From`` is empty or not exactly one valid address,
+            the ``List-Unsubscribe`` value is malformed, or another header
+            cannot be built.
+        OSError: an attachment cannot be read.
     """
     msg = EmailMessage(policy=POLICY)
     from_value = rendered.headers.get("From") or sender
+    mailbox, reason = _parse_mailbox(from_value)
+    if not from_value.strip():
+        raise ValueError("no From address: the template's From is empty here and no sender was given")
+    if mailbox is None:
+        raise ValueError(f"From must be exactly one valid address, got {from_value!r} ({reason})")
     msg["From"] = from_value
     msg["To"] = rendered.to
     for name in ("Cc", "Bcc", "Reply-To"):
@@ -316,8 +339,7 @@ def build_message(
             msg[name] = rendered.headers[name]
     msg["Subject"] = rendered.subject if rendered.subject.isascii() else _encoded_subject(rendered.subject)
     msg["Date"] = formatdate(localtime=True)
-    domain = parseaddr(from_value)[1].rpartition("@")[2] or None
-    msg["Message-ID"] = make_msgid(domain=domain)
+    msg["Message-ID"] = message_id(mailbox.domain)
     if list_unsubscribe:
         uris = _unsubscribe_uris(list_unsubscribe)
         if len("List-Unsubscribe: ") + len(", ".join(uris)) > _MAX_LINE:
@@ -335,6 +357,22 @@ def build_message(
     for item in attachments:
         _attach(msg, Path(item).read_bytes(), attachment_name(item))
     return msg
+
+
+def message_id(domain: str) -> str:
+    """A new ``Message-ID`` in ``domain``: 128 random bits, with the domain in ASCII (IDNA).
+
+    The standard library's ``make_msgid`` puts the process ID in the ID and
+    falls back to the machine's host name; this uses neither.
+
+    Raises:
+        ValueError: the domain cannot be converted to ASCII.
+    """
+    try:
+        ascii_domain = domain.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise ValueError(f"the domain {domain!r} cannot be converted to ASCII (IDNA)") from None
+    return f"<{secrets.token_hex(16)}@{ascii_domain.lower()}>"
 
 
 def needs_smtputf8(message: Message) -> bool:
