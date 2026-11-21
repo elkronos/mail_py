@@ -118,7 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     g = p.add_argument_group("dry run")
-    g.add_argument("--output-dir", metavar="DIR", help="save every message as a .eml file")
+    g.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        help="save every message as a .eml file (replacing the last dry run's files there)",
+    )
     g.add_argument("--preview", type=int, default=1, metavar="N", help="print the first N messages (default 1)")
     return p
 

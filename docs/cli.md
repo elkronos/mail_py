@@ -42,7 +42,7 @@ Without `--send`, the command validates everything, prints the first message
 | `--limit N` | Send at most N messages this run. |
 | `--max-failures N` | Stop after N failed messages in a row (default 5; `0` never stops). Unknown addresses and full mailboxes don't count. |
 | `--rate PER_MIN` | Maximum send rate (default 20 per minute; `0` for no limit). |
-| `--output-dir DIR` | Dry run: save every message as a `.eml` file. |
+| `--output-dir DIR` | Dry run: save every message as a `.eml` file. The `.eml` files an earlier dry run wrote to DIR are deleted first; other files are left alone. |
 | `--preview N` | Dry run: print the first N messages (default 1). |
 
 The SMTP password comes from the `EMAIL_MERGE_PASSWORD` environment variable,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import smtplib
@@ -13,7 +14,7 @@ from email.errors import MessageError
 from email.message import EmailMessage, Message
 from email.utils import getaddresses
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TextIO
 
 from .message import wire_bytes
 
@@ -583,24 +584,71 @@ class DryRunTransport:
     """Collect messages instead of sending them; optionally save them as ``.eml``.
 
     ``.eml`` files open in most mail clients, which is the most faithful way to
-    preview exactly what recipients will see.
+    preview exactly what recipients will see. Each file holds the bytes that
+    would go over SMTP, ``Bcc`` included, and is named after the message's
+    number and its ``To`` address, shortened with a hash past 80 characters.
+
+    The directory keeps a list of the files a dry run wrote, in
+    ``.email-merge-dry-run``. The next dry run into the same directory first
+    deletes those files, so the directory shows the latest run only. Other
+    files in it are never touched.
+
+    Raises:
+        FatalSendError: from ``open`` or ``send``, when the directory or a
+            file cannot be written.
     """
+
+    #: The file in ``output_dir`` that lists the ``.eml`` files the last run wrote.
+    MANIFEST = ".email-merge-dry-run"
 
     def __init__(self, output_dir: str | Path | None = None) -> None:
         self.output_dir = Path(output_dir) if output_dir is not None else None
         self.messages: list[EmailMessage] = []
+        self._manifest: TextIO | None = None
 
     def open(self) -> None:
-        if self.output_dir is not None:
+        if self.output_dir is None:
+            return
+        try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
+            manifest = self.output_dir / self.MANIFEST
+            if manifest.is_file():
+                for name in manifest.read_text(encoding="utf-8").splitlines():
+                    if _EML_NAME.fullmatch(name):  # a plain file name this class writes, never a path
+                        (self.output_dir / name).unlink(missing_ok=True)
+            self._manifest = manifest.open("w", encoding="utf-8")
+        except OSError as exc:
+            raise FatalSendError(f"cannot write the dry-run messages to {self.output_dir}: {exc}") from exc
 
     def send(self, message: EmailMessage) -> dict[str, tuple[int, bytes]]:
         self.messages.append(message)
         if self.output_dir is not None:
-            safe = "".join(c if c.isalnum() or c in "._@-" else "_" for c in str(message["To"]))
-            path = self.output_dir / f"{len(self.messages):05d}_{safe}.eml"
-            path.write_bytes(wire_bytes(message, keep_bcc=True))
+            if self._manifest is None:
+                self.open()
+            assert self._manifest is not None
+            name = f"{len(self.messages):05d}_{_file_label(str(message['To']))}.eml"
+            try:
+                self._manifest.write(name + "\n")  # listed first, so a file is never left unlisted
+                self._manifest.flush()
+                (self.output_dir / name).write_bytes(wire_bytes(message, keep_bcc=True))
+            except OSError as exc:
+                raise FatalSendError(f"cannot write {self.output_dir / name}: {exc}") from exc
         return {}
 
     def close(self) -> None:
-        pass
+        if self._manifest is not None:
+            self._manifest.close()
+            self._manifest = None
+
+
+# The names DryRunTransport gives its .eml files.
+_EML_NAME = re.compile(r"\d{5,}_[A-Za-z0-9._@-]*\.eml")
+
+
+def _file_label(to: str) -> str:
+    """The ``To`` address as part of a file name: ASCII, at most 80 characters."""
+    address = getaddresses([to])[0][1] or to
+    label = "".join(c if c.isascii() and (c.isalnum() or c in "._@-") else "_" for c in address)
+    if len(label) > 80:
+        label = label[:71] + "_" + hashlib.sha256(address.encode("utf-8")).hexdigest()[:8]
+    return label

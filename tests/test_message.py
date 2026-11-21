@@ -14,12 +14,14 @@ import pytest
 from email_merge_tool import (
     DataError,
     DryRunTransport,
+    FatalSendError,
     SMTPConfig,
     SMTPTransport,
     Template,
     build_message,
     mail_merge,
 )
+from email_merge_tool.cli import main
 from email_merge_tool.message import attachment_name, message_id, needs_smtputf8, wire_bytes
 from email_merge_tool.templates import RenderedMessage
 
@@ -365,3 +367,46 @@ def test_date_is_the_send_time_in_utc(people, monkeypatch):
     assert [sent - parsedate_to_datetime(date) for sent, date in transport.dates] == [timedelta(0)] * 4
     assert all(date.endswith(" +0000") for _, date in transport.dates)
     assert transport.dates[3][0] - transport.dates[0][0] == timedelta(hours=3)
+
+
+def test_dry_run_replaces_only_its_own_earlier_files(people, tmp_path):
+    out = tmp_path / "outbox"
+    out.mkdir()
+    keep = {"notes.txt": b"mine", "draft.eml": b"mine too", "00009_someone@example.org.eml": b"written by hand"}
+    for name, data in keep.items():
+        (out / name).write_bytes(data)
+    mail_merge(TPL, people, sender=SENDER, output_dir=out)
+    assert len(list(out.glob("0000?_*@example.org.eml"))) == 4 + 1
+    mail_merge(TPL, people[:2], sender=SENDER, output_dir=out)  # e.g. a reminder after two people replied
+    written = sorted(p.name for p in out.iterdir() if p.name not in keep and p.name != DryRunTransport.MANIFEST)
+    assert written == ["00001_ann@example.org.eml", "00002_bo@example.org.eml"]
+    assert {name: (out / name).read_bytes() for name in keep} == keep
+
+
+def test_dry_run_file_names_are_short_ascii(tmp_path):
+    local = "a" * 64
+    long_address = f"{local}@{'b' * 63}.{'c' * 63}.{'d' * 50}.org"
+    rows = [{"email": long_address}, {"email": "É" * 120 + " <z@example.org>"}]
+    mail_merge(Template(subject="s", text="t"), rows, sender=SENDER, output_dir=tmp_path)
+    names = sorted(p.name for p in tmp_path.glob("*.eml"))
+    assert names[1] == "00002_z@example.org.eml"
+    assert names[0].startswith("00001_" + local) and len(names[0]) == 6 + 80 + 4
+    assert names[0] != "00001_" + long_address[:80] + ".eml"
+
+
+def test_dry_run_write_errors_stop_the_run_cleanly(people, tmp_path, capsys):
+    blocked = tmp_path / "out"
+    blocked.mkdir()
+    (blocked / "00002_bo@example.org.eml").mkdir()  # a directory where the file should go
+    with pytest.raises(FatalSendError, match="cannot write .*00002_bo@example.org.eml"):
+        mail_merge(TPL, people, sender=SENDER, output_dir=blocked)
+    afile = tmp_path / "file"
+    afile.write_text("x", encoding="utf-8")
+    with pytest.raises(FatalSendError, match="cannot write the dry-run messages to"):
+        mail_merge(TPL, people, sender=SENDER, output_dir=afile)
+    template = tmp_path / "t.txt"
+    template.write_text("Subject: Hi\n\nHello\n", encoding="utf-8")
+    data = tmp_path / "people.csv"
+    data.write_text("email\nann@example.org\n", encoding="utf-8")
+    assert main(["-t", str(template), "-d", str(data), "--from", SENDER, "--output-dir", str(afile)]) == 2
+    assert "error: cannot write the dry-run messages to" in capsys.readouterr().err

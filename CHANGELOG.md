@@ -27,6 +27,7 @@
 - The `From` of every message must be exactly one valid address. A `From` placeholder that rendered empty used to send with an empty `From` and a null envelope sender, and one with two addresses went out without the `Sender` header RFC 5322 then requires; both now fail validation for their row. A blank `Subject` fails too, and a template `From` that replaces a different `sender=` is reported as a warning.
 - A `Message-ID` is 128 random bits at the `From` domain, converted to ASCII for an internationalized domain. It used to contain the process ID and could fall back to the machine's host name.
 - The `Date` header is the time each message is sent, in UTC. It was the time the messages were built, before the first send, so at the default rate every message after about three hours carried a date old enough for SpamAssassin to add points (`DATE_IN_PAST_03_06`), and it showed the sender's UTC offset.
+- A dry run into a directory deletes the `.eml` files the previous dry run wrote there, which it lists in `.email-merge-dry-run`, so the directory shows only the messages of the latest run. A reminder preview used to keep files for people who had since replied. Other files are never touched. File names use the address only, in ASCII, shortened with a hash past 80 characters, so a long address or display name no longer stops the dry run with "File name too long", and a file that cannot be written stops the run with an error message instead of a traceback.
 
 ### Changed
 - With `--security none`, `--port` defaults to 25 instead of 587.
